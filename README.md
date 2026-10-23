@@ -1,0 +1,111 @@
+# stayontarget
+
+stayontarget keeps Claude Code on the scope you asked for. It turns your prompts into a charter, a short statement of the goal, the work the request implies and anything you excluded. Then it grades each change the agent makes against that charter as in-scope, adjacent or drift. In warn mode it tells the model and you about drift; in strict mode it asks you before a drift change runs. It is a mod for Claude Code 2.1.309 and uses that release's early-access mod API, which may change.
+
+## Install
+
+From a terminal session, at the prompt:
+
+```
+/plugin install stayontarget --marketplace bladehstream/stayontarget
+```
+
+From a shell:
+
+```
+claude plugin install stayontarget --marketplace bladehstream/stayontarget
+```
+
+In the desktop app, `/plugin` does not run. Click + next to the prompt box, then Plugins, Add marketplace with `bladehstream/stayontarget`, then Add plugin.
+
+In a terminal, Claude Code asks `Add marketplace?`. Answer `y`, then choose a scope; the user scope is listed first. The install screen also sets the settings described below.
+
+To run the mod from a checkout while developing it, start Claude Code with the folder:
+
+```
+claude --plugin-dir <folder>
+```
+
+`claude plugin test <folder>` runs the mod's tests against the engine. An interactive session started that way also
+writes the API declarations into `.claude-plugin/types/`, after which `tsc -p <folder>` type-checks the mod.
+
+## How it works
+
+**Charter.** The charter comes from your prompts in the main conversation, from the body of a slash command or skill you invoke, and from later amendments. Chit-chat does not change it. A model (the `model` setting) distils your words into the charter. The update is lazy: submitting a prompt makes no model call, and the update runs when the first change needs a verdict. If the update fails or times out, your raw request stands in for the charter, and the pane shows `charter not distilled`.
+
+**What is judged.** Only changes are judged. Calls the engine marks as read-only are never checked and cost nothing. Edits, writes, notebook edits, shell commands and MCP calls are judged, each in a bounded, redacted form. Subagent changes are judged against the charter that was active when they ran.
+
+**Verdicts.** Each judged change gets one verdict:
+
+- in-scope: it serves the goal, or is a normal supporting step.
+- adjacent: not asked for, but a small, closely related step.
+- drift: work you did not ask for and the goal does not need, or anything you excluded.
+- unchecked: the judge failed or the input could not be read. An unchecked change is never blocked.
+
+Two shortcuts run before the judge. An allowance you gave in the pane makes the change in-scope. A cached verdict for the same change is reused; a different change to the same file is judged again.
+
+**Warn mode** is the default. Adjacent changes are recorded and shown in the pane. For a drift change, the mod adds a note to the model after the call. The note says the change looks outside the request and asks the model to say so or stop. When a turn has adjacent or drift changes, a footer lists them below the answer.
+
+**Strict mode** asks you before a drift change runs. Approving it runs that one change and creates no allowance.
+
+## Settings
+
+Defaults come from `plugin.json`:
+
+- `mode`: `warn` (default) or `strict`. Strict mode is for attended sessions. In a headless `claude -p` run nobody can answer the ask, so it becomes a denial.
+- `model`: the model used for charter updates and judgements. Default `haiku`.
+- `toasts`: show a toast on drift, at most one per 30 seconds. Default off.
+
+Invalid values fall back to the defaults.
+
+## Pane, command and status line
+
+`/stayontarget` opens the pane. `/stayontarget new` starts a new task, which clears the charter; the next main turn creates one. `/stayontarget eval` runs the judge over the labelled cases (see Accuracy).
+
+The pane shows the goal, the charter id and revision, whether the charter was distilled, the mode, verdict counts and the model tokens used this session. Events are listed newest first. Each adjacent or drift event has two buttons:
+
+- **Allow for this task** makes further changes of the same kind to the same target in-scope for this charter.
+- **Dismiss** closes the event.
+
+The goal can be edited where the surface has an input. The pane works on terminal, desktop and VS Code. On mobile it is read-only.
+
+The status line shows one of four texts:
+
+- `stayontarget: on target`
+- `stayontarget: N drift · M adjacent`
+- `stayontarget: degraded (K unchecked)`
+- `stayontarget: no charter yet`
+
+` · charter not distilled` is added when the charter update failed, and ` · not saved` when the session snapshot
+could not be stored.
+
+## Privacy and cost
+
+Only redacted, bounded text leaves the mod, and it goes to your session's own model client. Nothing is sent anywhere else.
+
+Redaction runs before any model call, display or saved state. It replaces bearer and basic auth headers, `Authorization:` headers, password, token, secret and API key assignments, AWS, GitHub, OpenAI, Anthropic and Slack key formats, PEM private key blocks, and URLs with user info. It is pattern-based and best-effort, so unusual quoting or escaping can get past it. One known gap: a URL with a password used as an object key longer
+than 256 characters is cut before it is redacted.
+
+Each judged change costs one model call, and each charter revision costs at most one charter update. The pane shows the tokens used. In the spike runs a Haiku judgement took about 1.3 to 1.6 seconds. A Write call took 25 to 40 milliseconds, so warn mode added about 1.3 to 1.5 seconds per judged write. A judged change in warn mode waits at most 7 seconds for its verdict. Strict mode adds the judge time before the call. Cache and allowance hits add no judge time.
+
+## Accuracy
+
+Live eval on 2026-10-23, Claude Code 2.1.309 on Windows 11, model `haiku`: 32 labelled cases, 93.8% accuracy, 0 unchecked. The run took 19 seconds and used 19,272 input and 2,460 output tokens.
+
+| Class | Cases | Precision | Recall |
+|---|---|---|---|
+| Drift | 15 | 100% | 100% |
+| In-scope | 13 | 92.3% | 92.3% |
+| Adjacent | 4 | 75% | 75% |
+
+Two of the 32 were wrong. A regression test labelled adjacent was judged in-scope, and an import update labelled in-scope was judged adjacent. The adjacent class has only 4 cases, so its numbers say little yet. Add more cases before you trust its precision.
+
+## Limitations
+
+- A subagent working in another directory has its paths normalised against the session's directory, so its targets may not match allowances made for relative paths.
+- A store write that hangs for more than 30 seconds is abandoned, and if it lands later it can overwrite a newer snapshot of the same session.
+- These interactive checks are not yet confirmed: strict mode under `bypassPermissions`, a prompt typed into a running turn, the footer and pane in the desktop app, whether the drift note changes the model's behaviour, and restore after resume.
+
+## Licence
+
+MIT. See `LICENSE`.

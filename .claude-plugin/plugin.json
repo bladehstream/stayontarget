@@ -1,0 +1,29 @@
+{
+  "name": "stayontarget",
+  "version": "0.1.0",
+  "description": "Keeps the agent on the requested scope: grades every change against what you asked for.",
+  "author": { "name": "bladehstream" },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "mode": {
+      "title": "Mode",
+      "type": "string",
+      "options": ["warn", "strict"],
+      "default": "warn",
+      "description": "warn: tell the model and you; strict: drift needs your approval"
+    },
+    "model": {
+      "title": "Model",
+      "type": "string",
+      "default": "haiku",
+      "description": "Model used for scope judgements"
+    },
+    "toasts": {
+      "title": "Toasts",
+      "type": "boolean",
+      "default": false,
+      "description": "Show a toast on drift (max one per 30 s)"
+    }
+  }
+}

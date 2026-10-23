@@ -1,0 +1,5 @@
+{
+  "name": "stayontarget",
+  "owner": { "name": "bladehstream" },
+  "plugins": [{ "name": "stayontarget", "source": "./" }]
+}
