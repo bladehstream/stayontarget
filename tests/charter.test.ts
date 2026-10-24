@@ -1,11 +1,13 @@
 import { expect, test } from 'claude-code/testing'
 import type { ModelCompleteRequest, ModelCompleteResult, ModelTextBlock } from 'claude-code'
 
-import type { Charter, Stats } from '../types'
+import type { Charter, ReadAs, Stats } from '../types'
 import { DEFAULT_CONFIG } from '../src/config'
 import type { CharterDollar } from '../src/charter'
 import {
   addScopeItem,
+  answerReadAs,
+  appendDelivered,
   editGoal,
   ensureCharter,
   onCommandSubmitted,
@@ -16,7 +18,7 @@ import {
 } from '../src/charter'
 import { getModelStats } from '../src/model'
 import { CHARTER_INSTRUCTIONS } from '../src/prompts'
-import { EMPTY_STATS, charterAtom, statsAtom } from '../src/state'
+import { EMPTY_STATS, charterAtom, readAsAtom, statsAtom } from '../src/state'
 
 const USAGE = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 const cfg = DEFAULT_CONFIG
@@ -43,6 +45,8 @@ function world() {
   let refusals = 0
   // Runs once, inside the next `set`, before its version check: a write that lands between update's read and write.
   let racing: (() => void) | null = null
+  // One-shot holds: the next write of a key waits until its release runs.
+  const gates = new Map<string, Promise<void>>()
 
   const write = (key: string, value: unknown) => {
     const version = (store.get(key)?.version ?? 0) + 1
@@ -57,6 +61,12 @@ function world() {
         return { value: entry?.value, version: entry?.version ?? 0 }
       },
       set: async (ref: Ref, value: unknown, options?: { ifVersion?: number }) => {
+        // A held write waits for its release before its version is checked, as a write the store has not yet answered.
+        const gate = gates.get(keyOf(ref))
+        if (gate !== undefined) {
+          gates.delete(keyOf(ref))
+          await gate
+        }
         if (racing !== null) {
           const race = racing
           racing = null
@@ -104,6 +114,17 @@ function world() {
             { once: true },
           )
         }),
+    // A timer runs when the clock reaches it, as a sleep does: `setNow` wakes both.
+    after: (ms: number, fire: () => void) => {
+      const entry = { due: clock + ms, wake: fire }
+      sleeps.push(entry)
+      return {
+        cancel: () => {
+          const index = sleeps.indexOf(entry)
+          if (index !== -1) sleeps.splice(index, 1)
+        },
+      }
+    },
     },
     ui: {
       log: (text: string) => {
@@ -141,6 +162,12 @@ function world() {
       write(charterKey, change(current))
     },
     refusals: () => refusals,
+    // Holds the next write of `ref` until the returned release runs.
+    hold: (ref: Ref): (() => void) => {
+      let release: () => void = () => undefined
+      gates.set(keyOf(ref), new Promise<void>(resolve => (release = resolve)))
+      return () => release()
+    },
     // Moves the clock to `ms`, waking each sleep that comes due on the way, in order.
     setNow: (ms: number) => {
       clock = ms
@@ -157,6 +184,7 @@ function world() {
       interleave = { at, run }
     },
     charter: () => (store.get(charterKey)?.value as Charter | null | undefined) ?? null,
+    readAs: () => (store.get(keyOf(readAsAtom.ref))?.value as ReadAs | null | undefined) ?? null,
     stats: () => (store.get(statsKey)?.value as Stats | undefined) ?? EMPTY_STATS,
   }
 }
@@ -893,4 +921,334 @@ test('a goal edit after a list edit keeps the list edited, so an amendment keeps
   await onMainTurnStart(w.$, 'also the docs', 2)
   await distil(w, said(amendment('Model goal', ['src/model.ts'])))
   expect(w.charter()).toMatchObject({ goal: 'Only the lexer', inScope: ['src/a.ts', 'src/mine.ts'], editedFields: ['inScope', 'goal'] })
+})
+
+// FR-CH-10: the "Read as" line. A charter with a task, then turns the model reads as the given replies.
+const failedReply: ModelCompleteResult = { isAnswered: false, reason: 'api-error', status: 500, error: 'overloaded', usage: USAGE }
+
+async function withTask(w: World): Promise<void> {
+  await onMainTurnStart(w.$, 'build the parser', 1)
+  await distil(w, said(newTask('Build parser')))
+}
+
+async function readingOf(w: World, text: string, reply: ModelCompleteResult): Promise<Charter | null> {
+  await onMainTurnStart(w.$, text, 1)
+  return distil(w, reply)
+}
+
+test('an amendment on a charter with a task is recorded with what it read and the charter before it (FR-CH-10)', async () => {
+  const w = world()
+  await withTask(w)
+  const before = w.charter()
+
+  const after = await readingOf(w, 'also update the tests', said(amendment('Build parser and its tests')))
+
+  expect(w.readAs()).toEqual({
+    reading: 'amendment',
+    head: 'also update the tests',
+    before,
+    consumed: ['also update the tests'],
+    afterId: after?.id,
+    afterRev: 2,
+    at: 0,
+  })
+})
+
+test('a new-task reading on a charter with a task is recorded against the new charter (FR-CH-10)', async () => {
+  const w = world()
+  await withTask(w)
+  const before = w.charter()
+
+  const after = await readingOf(w, 'write the docs', said(newTask('Write docs')))
+
+  expect(w.readAs()).toMatchObject({ reading: 'new-task', head: 'write the docs', afterId: after?.id, afterRev: 1 })
+  expect(after?.id).not.toBe(before?.id)
+  expect(w.readAs()?.before).toEqual(before)
+})
+
+test('no reading is recorded for chit-chat, the first charter, or the failure merge (FR-CH-10)', async () => {
+  const chat = world()
+  await withTask(chat)
+  await readingOf(chat, 'thanks', said(chitChat))
+  expect(chat.readAs()).toBeNull()
+
+  const first = world()
+  await onMainTurnStart(first.$, 'build the parser', 1)
+  await distil(first, said(amendment('Build parser')))
+  expect(first.readAs()).toBeNull()
+
+  const failed = world()
+  await withTask(failed)
+  await readingOf(failed, 'more', failedReply)
+  expect(failed.readAs()).toBeNull()
+  expect(failed.charter()).toMatchObject({ distilled: false })
+})
+
+test('the head of a reading is redacted, one line, and cut to 80 characters (FR-CH-10, FR-AX-3)', async () => {
+  const w = world()
+  await withTask(w)
+
+  await readingOf(w, `password=hunter2\nand ${'x'.repeat(200)}`, said(amendment('Build parser and more')))
+
+  expect(w.readAs()?.head.length).toBe(80)
+  expect(w.readAs()?.head.startsWith('password=«redacted» and ')).toBe(true)
+  expect(w.readAs()?.head).not.toContain('hunter2')
+})
+
+test('a new main turn clears the reading, even one with no text (FR-CH-10)', async () => {
+  const w = world()
+  await withTask(w)
+  await readingOf(w, 'also update the tests', said(amendment('Build parser and its tests')))
+  expect(w.readAs()).not.toBeNull()
+
+  await onMainTurnStart(w.$, '', 2)
+
+  expect(w.readAs()).toBeNull()
+})
+
+test('a Same task correction forces the next update to an amendment, whatever the model says, and the field is consumed (FR-CH-10)', async () => {
+  const w = world()
+  await withTask(w)
+  const before = w.charter()
+  await readingOf(w, 'a second thing', said(newTask('Other work')))
+
+  expect(await answerReadAs(w.$, 'same-task', 3)).toBe(true)
+  expect(w.charter()).toMatchObject({ id: before?.id, rev: 1, pendingText: ['a second thing'], forcedReading: 'amendment' })
+  expect(w.readAs()).toBeNull()
+
+  const after = await distil(w, said(newTask('Other work')))
+
+  expect(after).toMatchObject({ id: before?.id, rev: 2, distilled: true, goal: 'Other work' })
+  expect(after?.request).toBe('build the parser\n---\na second thing')
+  expect(after).not.toHaveProperty('forcedReading')
+  // F3: the forced update is the person's own answer, so no reading is shown for it.
+  expect(w.readAs()).toBeNull()
+})
+
+test('New task from an amendment: a fresh rev-0 charter holds the consumed text, and the next ensure distils it (FR-CH-10)', async () => {
+  const w = world()
+  await withTask(w)
+  const old = w.charter()
+  await readingOf(w, 'also update the tests', said(amendment('Build parser and its tests')))
+
+  expect(await answerReadAs(w.$, 'new-task', 9)).toBe(true)
+  expect(w.charter()).toMatchObject({
+    rev: 0,
+    request: '',
+    goal: null,
+    distilled: false,
+    pendingText: ['also update the tests'],
+    createdAt: 9,
+  })
+  expect(w.charter()?.id).not.toBe(old?.id)
+  expect(w.readAs()).toBeNull()
+
+  const after = await distil(w, said(newTask('Update the tests')))
+
+  expect(after).toMatchObject({ rev: 1, request: 'also update the tests', distilled: true, goal: 'Update the tests' })
+  expect(after?.id).not.toBe(old?.id)
+})
+
+test('Not a change restores the charter before the update exactly, and drops the consumed text (FR-CH-10)', async () => {
+  const w = world()
+  await withTask(w)
+  const before = w.charter()
+  await readingOf(w, 'also update the tests', said(amendment('Build parser and its tests')))
+
+  expect(await answerReadAs(w.$, 'no-change', 3)).toBe(true)
+
+  expect(w.charter()).toEqual(before)
+  expect(w.readAs()).toBeNull()
+})
+
+test('Not a change from a new-task reading restores the charter before it exactly (FR-CH-10)', async () => {
+  const w = world()
+  await withTask(w)
+  const before = w.charter()
+  await readingOf(w, 'write the docs', said(newTask('Write docs')))
+
+  expect(await answerReadAs(w.$, 'no-change', 3)).toBe(true)
+
+  expect(w.charter()).toEqual(before)
+})
+
+test('Same task from an amendment restores the charter before it, with the consumed text forced (FR-CH-10)', async () => {
+  const w = world()
+  await withTask(w)
+  const before = w.charter()
+  await readingOf(w, 'also update the tests', said(amendment('Build parser and its tests')))
+
+  expect(await answerReadAs(w.$, 'same-task', 3)).toBe(true)
+
+  expect(w.charter()).toMatchObject({
+    id: before?.id,
+    rev: 1,
+    request: 'build the parser',
+    pendingText: ['also update the tests'],
+    forcedReading: 'amendment',
+  })
+  expect(w.readAs()).toBeNull()
+})
+
+test('New task from a new-task reading: a fresh rev-0 charter holds the consumed text (FR-CH-10)', async () => {
+  const w = world()
+  await withTask(w)
+  const old = w.charter()
+  await readingOf(w, 'write the docs', said(newTask('Write docs')))
+
+  expect(await answerReadAs(w.$, 'new-task', 9)).toBe(true)
+
+  expect(w.charter()).toMatchObject({ rev: 0, request: '', pendingText: ['write the docs'], createdAt: 9 })
+  expect(w.charter()?.id).not.toBe(old?.id)
+  expect(w.readAs()).toBeNull()
+})
+
+test('OK from a new-task reading clears it and changes nothing (FR-CH-10)', async () => {
+  const w = world()
+  await withTask(w)
+  await readingOf(w, 'write the docs', said(newTask('Write docs')))
+  const shown = w.charter()
+
+  expect(await answerReadAs(w.$, 'accept', 3)).toBe(false)
+
+  expect(w.charter()).toEqual(shown)
+  expect(w.readAs()).toBeNull()
+})
+
+test('a prompt delivered after a reading blocks every correction, which leaves the pending text and clears the line (FR-CH-10)', async () => {
+  for (const choice of ['new-task', 'same-task', 'no-change', 'accept'] as const) {
+    const w = world()
+    await withTask(w)
+    await readingOf(w, 'also update the tests', said(amendment('Build parser and its tests')))
+    await appendDelivered(w.$, 'and the docs too', 2)
+    const shown = w.charter()
+
+    expect(await answerReadAs(w.$, choice, 3)).toBe(false)
+
+    expect(w.charter()).toEqual(shown)
+    expect(w.charter()?.pendingText).toEqual(['and the docs too'])
+    expect(w.readAs()).toBeNull()
+  }
+})
+
+test('a reading expires ten minutes after it was recorded, with no redraw (FR-CH-10)', async () => {
+  const w = world()
+  await withTask(w)
+  await readingOf(w, 'also update the tests', said(amendment('Build parser and its tests')))
+
+  w.setNow(599_999)
+  await w.flush()
+  expect(w.readAs()).not.toBeNull()
+
+  w.setNow(600_000)
+  await w.flush()
+  expect(w.readAs()).toBeNull()
+})
+
+test('an expiry clears only its own reading: a newer reading keeps the line (FR-CH-10)', async () => {
+  const w = world()
+  await withTask(w)
+  await readingOf(w, 'also update the tests', said(amendment('Build parser and its tests')))
+  w.setNow(300_000)
+  await readingOf(w, 'and the docs', said(amendment('Build parser, tests and docs')))
+  const newer = w.readAs()
+
+  w.setNow(600_000)
+  await w.flush()
+  expect(w.readAs()).toEqual(newer)
+
+  w.setNow(900_000)
+  await w.flush()
+  expect(w.readAs()).toBeNull()
+})
+
+test('a correction on a reading past ten minutes changes nothing and clears the line (FR-CH-10)', async () => {
+  const w = world()
+  await withTask(w)
+  await readingOf(w, 'also update the tests', said(amendment('Build parser and its tests')))
+  const shown = w.charter()
+
+  expect(await answerReadAs(w.$, 'no-change', 600_001)).toBe(false)
+
+  expect(w.charter()).toEqual(shown)
+  expect(w.readAs()).toBeNull()
+  expect(w.logs).toContain('stayontarget: read-as correction skipped: reading expired')
+})
+
+test('a reading whose write is in flight when a main turn starts is not shown (FR-CH-10)', async () => {
+  const w = world()
+  await withTask(w)
+  await onMainTurnStart(w.$, 'also update the tests', 1)
+  const release = w.hold(readAsAtom.ref)
+  const pending = ensureCharter(w.$, cfg, 0)
+  await w.answer(said(amendment('Build parser and its tests')))
+  // The commit lands and its reading write waits at the hold: the charter is the one the reading committed.
+  for (let turn = 0; turn < 5; turn++) await w.flush()
+  expect(w.charter()).toMatchObject({ rev: 2, pendingText: [] })
+  expect(w.readAs()).toBeNull()
+
+  await onMainTurnStart(w.$, 'and something else', 2)
+  release()
+  await pending
+  await w.flush()
+
+  expect(w.readAs()).toBeNull()
+})
+
+test('a correction held on its charter write leaves a newer reading in place (FR-CH-10)', async () => {
+  const w = world()
+  await withTask(w)
+  await readingOf(w, 'also update the tests', said(amendment('Build parser and its tests')))
+  const release = w.hold(charterAtom.ref)
+  const correction = answerReadAs(w.$, 'no-change', 3)
+  await w.flush()
+
+  await readingOf(w, 'write the docs', said(newTask('Write docs')))
+  const newer = w.readAs()
+  expect(newer?.reading).toBe('new-task')
+
+  release()
+  expect(await correction).toBe(false)
+  await w.flush()
+
+  expect(w.readAs()).toEqual(newer)
+})
+
+test('OK clears the reading and changes nothing (FR-CH-10)', async () => {
+  const w = world()
+  await withTask(w)
+  await readingOf(w, 'also update the tests', said(amendment('Build parser and its tests')))
+  const shown = w.charter()
+
+  expect(await answerReadAs(w.$, 'accept', 3)).toBe(false)
+
+  expect(w.charter()).toEqual(shown)
+  expect(w.readAs()).toBeNull()
+})
+
+test('a correction after the charter moved on clears the reading, leaves the charter, and logs it (FR-CH-10)', async () => {
+  const w = world()
+  await withTask(w)
+  await readingOf(w, 'also update the tests', said(amendment('Build parser and its tests')))
+  w.bump(charter => ({ ...charter, rev: charter.rev + 1 }))
+  const moved = w.charter()
+
+  expect(await answerReadAs(w.$, 'new-task', 3)).toBe(false)
+
+  expect(w.charter()).toEqual(moved)
+  expect(w.readAs()).toBeNull()
+  expect(w.logs).toContain('stayontarget: read-as correction skipped: charter changed')
+})
+
+test('a person edit made before a reading survives Not a change, as the charter before it stored it (FR-CH-10, FR-CH-8)', async () => {
+  const w = world()
+  await withTask(w)
+  await editGoal(w.$, 'Only the parser')
+  const edited = w.charter()
+  await readingOf(w, 'also update the tests', said(amendment('Model goal', ['src/model.ts'])))
+
+  await answerReadAs(w.$, 'no-change', 3)
+
+  expect(w.charter()).toEqual(edited)
+  expect(w.charter()?.goal).toBe('Only the parser')
 })

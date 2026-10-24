@@ -11,6 +11,20 @@ export type Charter = {
   editedFields: ('goal' | 'inScope' | 'outOfScope')[]
   pendingText: string[]
   createdAt: number
+  // FR-CH-10: set by the `Same task` correction, consumed (removed) by the next applied update, which then takes the
+  // reading as an amendment whatever the model said.
+  forcedReading?: 'amendment'
+}
+
+// FR-CH-10: the reading of the last charter update, while the "Read as" line stands. View state: never in a snapshot.
+export type ReadAs = {
+  reading: 'new-task' | 'amendment'
+  head: string
+  before: Charter
+  consumed: string[]
+  afterId: string
+  afterRev: number
+  at: number
 }
 
 export type DriftEvent = {
@@ -61,6 +75,7 @@ declare module 'claude-code' {
       allowances: Allowance[]
       stats: Stats
       ui: UiState
+      readAs: ReadAs | null
     }
   }
 }

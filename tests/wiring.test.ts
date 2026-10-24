@@ -7,7 +7,9 @@ import { __atoms as judgeAtoms } from '../src/judge'
 import { __atoms as eventAtoms } from '../src/events'
 import { __atoms as statusAtoms } from '../src/status'
 import { __atoms as actionAtoms } from '../src/actions'
+import { __atoms as markAtoms } from '../src/marks'
 import { __atoms as paneAtoms } from '../src/pane'
+import { __atoms as persistAtoms } from '../src/persist'
 import * as shared from '../src/state'
 
 // The hooks of the plugin under test, driven through the kit. The engine answers beneath them; the test's bottom hooks
@@ -86,7 +88,7 @@ function beneath(on: On): string[] {
 // Each module declares its own atoms (the engine's scan needs them in the calling file); each must name the same ref and
 // initial value as src/state.ts, or the module would read and write a different slot.
 test('the atoms each module declares match src/state.ts in ref and initial value', () => {
-  const local = [charterAtoms, judgeAtoms, eventAtoms, statusAtoms, actionAtoms, paneAtoms]
+  const local = [charterAtoms, judgeAtoms, eventAtoms, statusAtoms, actionAtoms, markAtoms, paneAtoms, persistAtoms]
   for (const atoms of local) {
     for (const [name, atom] of Object.entries(atoms)) {
       const want = shared[name as keyof typeof shared] as { ref: unknown; initial: unknown }

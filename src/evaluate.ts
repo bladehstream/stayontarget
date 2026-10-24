@@ -1,10 +1,12 @@
 import type { DriftEvent, Charter, Verdict } from '../types'
 
 import { REDACT_WINDOW_MARGIN, bound, extractAction } from './action'
+import { CHARTER_MAX_TOKENS, askBody, charterOfCase, parseReply } from './charter'
 import type { Config } from './config'
 import type { JudgeDollar } from './judge'
 import { judgeOnce } from './judge'
-import { CONCURRENCY, messageOf } from './model'
+import { CONCURRENCY, callModel, messageOf } from './model'
+import { CHARTER_INSTRUCTIONS } from './prompts'
 import { redactText } from './redact'
 
 // FR-EV-1: one labelled case of the eval set (evals/drift-cases.json). `expected` is the verdict the case should get.
@@ -267,5 +269,184 @@ export function formatReport(r: EvalReport): string {
   const mismatches = r.cases.filter(c => c.got !== c.expected)
   if (mismatches.length === 0) lines.push('None.')
   for (const c of mismatches) lines.push(`- ${c.id}: expected ${c.expected}, got ${c.got} — ${c.reason}`)
+  return lines.join('\n')
+}
+
+// FR-EV-3: one labelled case of the charter eval (evals/charter-cases.json). `charter` is null for a session with no task
+// yet; `messages` are the new messages the reading is about, oldest first; `expected` is the kind the case should get.
+export type CharterKind = 'new-task' | 'amendment' | 'chit-chat'
+export type CharterCase = {
+  id: string
+  charter: { goal: string; inScope: string[]; outOfScope: string[]; request: string } | null
+  messages: string[]
+  expected: CharterKind
+}
+
+// The columns of the charter matrix: a model's kind, or unchecked (a failed call or an invalid reply).
+export type CharterColumn = CharterKind | 'unchecked'
+const CHARTER_KINDS: readonly CharterKind[] = ['new-task', 'amendment', 'chit-chat']
+const CHARTER_COLUMNS: readonly CharterColumn[] = [...CHARTER_KINDS, 'unchecked']
+
+export type CharterEvalReport = {
+  cases: { id: string; expected: CharterKind; got: CharterColumn; reason: string }[]
+  // matrix[expected][got]: how often each expected kind got each column.
+  matrix: Record<CharterKind, Record<CharterColumn, number>>
+  // As EvalReport: null when the denominator is zero.
+  precision: Record<CharterKind, number | null>
+  recall: Record<CharterKind, number | null>
+  accuracy: number
+  unchecked: number
+  inputTokens: number
+  outputTokens: number
+  elapsedMs: number
+  total: number
+}
+
+// Validates the whole charter file before anything is classified; a bad case throws with its id. The shape is the one the
+// file is labelled in: id, charter (null or the four fields), messages (non-empty), and expected (one of the three kinds).
+export function parseCharterCases(json: string): CharterCase[] {
+  let root: unknown
+  try {
+    root = JSON.parse(json)
+  } catch (err) {
+    throw new Error(`charter eval file is not JSON: ${messageOf(err)}`)
+  }
+  const list = isRecord(root) ? root.cases : undefined
+  if (!Array.isArray(list) || list.length === 0) throw new Error('charter eval file has no "cases" list')
+  if (list.length > MAX_CASES) throw new Error(`charter eval file has more than ${MAX_CASES} cases`)
+
+  const seen = new Set<string>()
+  return list.map((raw, index): CharterCase => {
+    if (!isRecord(raw)) throw new Error(`charter eval case #${index}: not an object`)
+    const id = textOf(raw.id, `#${index}`, 'id')
+    if (seen.has(id)) fail(id, 'duplicate id')
+    seen.add(id)
+
+    let charter: CharterCase['charter'] = null
+    if (raw.charter !== null) {
+      if (!isRecord(raw.charter)) fail(id, 'charter must be null or an object')
+      charter = {
+        goal: textOf(raw.charter.goal, id, 'charter.goal'),
+        inScope: stringsOf(raw.charter.inScope, id, 'charter.inScope'),
+        outOfScope: stringsOf(raw.charter.outOfScope, id, 'charter.outOfScope'),
+        request: textOf(raw.charter.request, id, 'charter.request'),
+      }
+    }
+
+    const messages = stringsOf(raw.messages, id, 'messages')
+    if (messages.length === 0) fail(id, 'messages must not be empty')
+    if (!CHARTER_KINDS.includes(raw.expected as CharterKind)) fail(id, 'expected must be new-task, amendment or chit-chat')
+    return { id, charter, messages, expected: raw.expected as CharterKind }
+  })
+}
+
+type Classified = { got: CharterColumn; reason: string; inputTokens: number; outputTokens: number }
+
+// One case through the production charter prompt and parser (FR-EV-3). The model's own kind is scored: no rev-0 rule, no
+// state, no stats. Never throws, so one case cannot end the run.
+async function classifyCase($: JudgeDollar, cfg: Config, c: CharterCase): Promise<Classified> {
+  try {
+    const charter = charterOfCase(`eval-${c.id}`, c.charter, c.messages)
+    const outcome = await callModel($, {
+      model: cfg.model,
+      instructions: CHARTER_INSTRUCTIONS,
+      body: askBody(charter),
+      maxTokens: CHARTER_MAX_TOKENS,
+      deadlineMs: EVAL_DEADLINE_MS,
+    })
+    const tokens = { inputTokens: outcome.inputTokens, outputTokens: outcome.outputTokens }
+    if (!outcome.ok) return { got: 'unchecked', reason: `model ${outcome.reason}`, ...tokens }
+    const reply = parseReply(outcome.text)
+    if (reply === null) return { got: 'unchecked', reason: 'invalid reply', ...tokens }
+    return { got: reply.kind, reason: '', ...tokens }
+  } catch (err) {
+    $.ui.log(`stayontarget: charter eval case ${c.id} failed: ${messageOf(err)}`, { to: 'debug' })
+    return { got: 'unchecked', reason: 'internal error', inputTokens: 0, outputTokens: 0 }
+  }
+}
+
+// Runs the charter cases in batches of CONCURRENCY, as runEval does (FR-VD-6). A signal aborted between batches stops the
+// run with the cases so far reported. Never throws.
+export async function runCharterEval(
+  $: JudgeDollar,
+  cfg: Config,
+  cases: CharterCase[],
+  signal?: AbortSignal,
+): Promise<CharterEvalReport> {
+  const started = await $.clock.now()
+  const judged: Classified[] = []
+  for (let i = 0; i < cases.length && signal?.aborted !== true; i += CONCURRENCY) {
+    const batch = cases.slice(i, i + CONCURRENCY)
+    judged.push(...(await Promise.all(batch.map(c => classifyCase($, cfg, c)))))
+  }
+  const elapsedMs = (await $.clock.now()) - started
+
+  const matrix = Object.fromEntries(
+    CHARTER_KINDS.map(expected => [expected, Object.fromEntries(CHARTER_COLUMNS.map(got => [got, 0]))]),
+  ) as CharterEvalReport['matrix']
+  const cells = judged.map((result, index) => {
+    const c = cases[index] as CharterCase
+    matrix[c.expected][result.got] += 1
+    return { id: c.id, expected: c.expected, got: result.got, reason: result.reason }
+  })
+
+  const precision = {} as CharterEvalReport['precision']
+  const recall = {} as CharterEvalReport['recall']
+  for (const kind of CHARTER_KINDS) {
+    const predicted = cells.filter(x => x.got === kind).length
+    const correct = cells.filter(x => x.got === kind && x.expected === kind).length
+    const expected = cells.filter(x => x.expected === kind).length
+    precision[kind] = predicted === 0 ? null : correct / predicted
+    recall[kind] = expected === 0 ? null : correct / expected
+  }
+
+  const correct = cells.filter(x => x.got === x.expected).length
+  return {
+    cases: cells,
+    matrix,
+    precision,
+    recall,
+    accuracy: cells.length === 0 ? 0 : correct / cells.length,
+    unchecked: cells.filter(x => x.got === 'unchecked').length,
+    inputTokens: judged.reduce((sum, j) => sum + j.inputTokens, 0),
+    outputTokens: judged.reduce((sum, j) => sum + j.outputTokens, 0),
+    elapsedMs,
+    total: cases.length,
+  }
+}
+
+// The charter report as a section of Markdown: the summary, the matrix with an unchecked column, precision and recall per
+// kind, then every mismatch with the kind the reply gave.
+export function formatCharterReport(r: CharterEvalReport): string {
+  const lines = [
+    '## Charter classification',
+    '',
+    `Cases: ${r.cases.length} · accuracy ${percent(r.accuracy)} · unchecked ${r.unchecked} · ` +
+      `tokens in ${r.inputTokens} / out ${r.outputTokens} · elapsed ${r.elapsedMs} ms`,
+    ...(r.cases.length < r.total ? [`Stopped early: ${r.cases.length} of ${r.total} cases ran.`] : []),
+    '',
+    '### Matrix (rows: expected, columns: got)',
+    '',
+    `| expected | ${CHARTER_COLUMNS.join(' | ')} |`,
+    `|---|${CHARTER_COLUMNS.map(() => '---').join('|')}|`,
+    ...CHARTER_KINDS.map(
+      expected => `| ${expected} | ${CHARTER_COLUMNS.map(got => r.matrix[expected][got]).join(' | ')} |`,
+    ),
+    '',
+    '### Precision and recall',
+    '',
+    '| kind | precision | recall |',
+    '|---|---|---|',
+    ...CHARTER_KINDS.map(kind => `| ${kind} | ${percent(r.precision[kind])} | ${percent(r.recall[kind])} |`),
+    '',
+    '### Mismatches',
+    '',
+  ]
+  const mismatches = r.cases.filter(c => c.got !== c.expected)
+  if (mismatches.length === 0) lines.push('None.')
+  for (const c of mismatches) {
+    const detail = c.got === 'unchecked' ? ` (${c.reason})` : ''
+    lines.push(`- ${c.id}: expected ${c.expected}, got ${c.got}${detail}`)
+  }
   return lines.join('\n')
 }

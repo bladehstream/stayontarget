@@ -1,9 +1,10 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import type { Allowance, Charter, DriftEvent } from '../types'
+import type { Allowance, Charter, DriftEvent, ReadAs } from '../types'
 import { footerHead, footerRows } from '../src/events'
+import { readAsLine } from '../src/marks'
 import { EMPTY_STATS } from '../src/state'
 
 // The marks are mounted through the plugin on each surface, beneath an engine row the test answers as a tree. The state
@@ -123,7 +124,10 @@ function toolRow(surface: (typeof SURFACES)[number], id: string, columns = 80) {
   }
 }
 
-function band(surface: (typeof BAND_SURFACES)[number], options: { hasSurvey?: boolean; agentId?: string; columns?: number } = {}) {
+function band(
+  surface: (typeof BAND_SURFACES)[number],
+  options: { hasSurvey?: boolean; agentId?: string; columns?: number; maxRows?: number } = {},
+) {
   return {
     plugin: 'stayontarget',
     surface,
@@ -131,7 +135,7 @@ function band(surface: (typeof BAND_SURFACES)[number], options: { hasSurvey?: bo
     props: {
       hasSurvey: options.hasSurvey ?? false,
       isWorking: false,
-      maxRows: 10,
+      maxRows: options.maxRows ?? 10,
       bodyColumns: options.columns ?? 80,
       scroll: { offset: 0, bodyRows: 10 },
       view: options.agentId === undefined ? {} : { agentId: options.agentId },
@@ -150,6 +154,49 @@ function message(surface: (typeof SURFACES)[number], text: string) {
     viewport: { columns: 80, rows: 24 },
   }
 }
+
+// FR-CH-10: a reading of an amendment, one minute old at the time the band draws it.
+const READ_AS: ReadAs = {
+  reading: 'amendment',
+  head: 'also update the tests',
+  before: { ...CHARTER, rev: 1, request: 'fix the parser', pendingText: [] },
+  consumed: ['also update the tests'],
+  afterId: 'c1',
+  afterRev: 2,
+  at: 0,
+}
+const LINE = 'Read as amendment: "also update the tests"'
+
+test('the read-as line is hidden with no reading, and once the reading is ten minutes old (FR-CH-10)', () => {
+  expect(readAsLine(null, 0, 80)).toBeNull()
+  expect(readAsLine(READ_AS, 600_000, 80)).not.toBeNull()
+  expect(readAsLine(READ_AS, 600_001, 80)).toBeNull()
+})
+
+test('the read-as buttons follow the reading, and OK is always there (FR-CH-10)', () => {
+  expect(readAsLine(READ_AS, 0, 80)?.buttons).toEqual(['ra-new', 'ra-none', 'ra-ok'])
+  expect(readAsLine({ ...READ_AS, reading: 'new-task' }, 0, 80)?.buttons).toEqual(['ra-same', 'ra-none', 'ra-ok'])
+})
+
+test('the read-as line keeps its text whole at 80 columns, beside its buttons (FR-CH-10)', () => {
+  expect(readAsLine(READ_AS, 0, 80)).toEqual({ text: LINE, buttons: ['ra-new', 'ra-none', 'ra-ok'] })
+})
+
+test('at 50 columns the read-as text is cut beside its buttons, keeping 20 cells (FR-CH-10)', () => {
+  const line = readAsLine(READ_AS, 0, 50)
+
+  expect(line?.buttons).toEqual(['ra-new', 'ra-none', 'ra-ok'])
+  expect(line?.text).toBe(`${LINE.slice(0, 19)}…`)
+  expect(line?.text.length).toBe(20)
+})
+
+test('at 30 columns the read-as buttons go and the text takes the width (FR-CH-10)', () => {
+  expect(readAsLine(READ_AS, 0, 30)).toEqual({ text: `${LINE.slice(0, 29)}…`, buttons: [] })
+})
+
+test('mobile has the read-as text only, at the full width (FR-CH-10)', () => {
+  expect(readAsLine(READ_AS, 0, 80, true)).toEqual({ text: LINE, buttons: [] })
+})
 
 test('a tool row with no event is the engine row, unchanged (FR-UI-6)', async ($, on) => {
   stateBeneath(on, seeded([]))
@@ -493,5 +540,95 @@ test('at 40 columns the badge buttons move to a line of their own and the reason
   expect((await ui.find({ type: 'Text', text: /^ — x{17}…$/ })) !== undefined).toBe(true)
   expect((await ui.find({ type: 'Button', key: 'allow-e1' })) !== undefined).toBe(true)
   expect((await ui.find({ type: 'Button', key: 'dismiss-e1' })) !== undefined).toBe(true)
+  await ui.unmount()
+})
+
+test('the band shows the read-as line alone when nothing is open, with the buttons its reading gives (FR-CH-10, FR-UI-7)', async ($, on) => {
+  mock.clock(on)
+  stateBeneath(on, { ...seeded([]), readAs: READ_AS })
+  engine(on)
+
+  for (const surface of BAND_SURFACES) {
+    const ui = await $.ui.mount(band(surface))
+    expect((await ui.find({ type: 'Text', text: LINE })) !== undefined).toBe(true)
+    expect((await ui.find({ type: 'Button', key: 'band-ra-new' })) !== undefined).toBe(true)
+    expect((await ui.find({ type: 'Button', key: 'band-ra-none' })) !== undefined).toBe(true)
+    expect((await ui.find({ type: 'Button', key: 'band-ra-ok' })) !== undefined).toBe(true)
+    expect((await ui.find({ type: 'Button', key: 'band-ra-same' })) === undefined).toBe(true)
+    expect((await ui.find({ type: 'Button', key: 'band-review' })) === undefined).toBe(true)
+    await ui.unmount()
+  }
+})
+
+test('a new-task reading offers Same task, not New task (FR-CH-10)', async ($, on) => {
+  mock.clock(on)
+  stateBeneath(on, { ...seeded([]), readAs: { ...READ_AS, reading: 'new-task' } })
+  engine(on)
+  const ui = await $.ui.mount(band('desktop'))
+
+  expect((await ui.find({ type: 'Button', key: 'band-ra-same' })) !== undefined).toBe(true)
+  expect((await ui.find({ type: 'Button', key: 'band-ra-new' })) === undefined).toBe(true)
+  await ui.unmount()
+})
+
+test('the band has the read-as line above the counts with two rows, and only the line with one (FR-CH-10, FR-UI-7)', async ($, on) => {
+  mock.clock(on)
+  stateBeneath(on, { ...seeded([event('e1'), event('e2', 'adjacent')]), readAs: READ_AS })
+  engine(on)
+  const counts = /^stayontarget: fix the parser · 1 drift · 1 adjacent$/
+
+  const two = await $.ui.mount(band('desktop', { maxRows: 2 }))
+  expect((await two.find({ type: 'Text', text: LINE })) !== undefined).toBe(true)
+  expect((await two.find({ type: 'Text', text: counts })) !== undefined).toBe(true)
+  await two.unmount()
+
+  const one = await $.ui.mount(band('desktop', { maxRows: 1 }))
+  expect((await one.find({ type: 'Text', text: LINE })) !== undefined).toBe(true)
+  expect((await one.find({ type: 'Text', text: counts })) === undefined).toBe(true)
+  await one.unmount()
+})
+
+test('the read-as row fits its body at 80, 50 and 30 columns, text and labels together (FR-CH-10)', async ($, on) => {
+  mock.clock(on)
+  stateBeneath(on, { ...seeded([]), readAs: READ_AS })
+  engine(on)
+
+  for (const columns of [80, 50, 30]) {
+    const ui = await $.ui.mount(band('desktop', { columns }))
+    const line = await ui.find({ type: 'Text', text: /^Read as / })
+    // The same width rule as the counts row: the labels plus the engine's chrome, once for the group of buttons.
+    const labels = (await ui.findAll({ type: 'Button' })).map(button => String(button.props.label))
+    const buttons = labels.length === 0 ? 0 : labels.reduce((n, label) => n + label.length, 0) + 8
+
+    expect(line !== undefined).toBe(true)
+    expect((line?.text.length ?? 0) + buttons).toBeLessThanOrEqual(columns)
+    await ui.unmount()
+  }
+})
+
+test('the read-as line is hidden once its reading is ten minutes old, and the band falls back to the engine (FR-CH-10)', async ($, on) => {
+  const clock = mock.clock(on)
+  stateBeneath(on, { ...seeded([]), readAs: READ_AS })
+  engine(on)
+  await clock.advance(600_001)
+
+  const ui = await $.ui.mount(band('desktop'))
+
+  expect((await ui.find({ type: 'Text', text: LINE })) === undefined).toBe(true)
+  expect((await ui.find({ type: 'Text', text: /^engine band$/ })) !== undefined).toBe(true)
+  await ui.unmount()
+})
+
+test('New task on the read-as line clears it and makes a fresh charter that holds the text (FR-CH-10)', async ($, on) => {
+  mock.clock(on)
+  const state = stateBeneath(on, { ...seeded([]), readAs: READ_AS })
+  engine(on)
+  const ui = await $.ui.mount(band('desktop'))
+
+  await ui.press({ key: 'band-ra-new' })
+  await ui.redraw()
+
+  expect(state('readAs')).toBeNull()
+  expect(state('charter')).toMatchObject({ rev: 0, request: '', pendingText: ['also update the tests'] })
   await ui.unmount()
 })

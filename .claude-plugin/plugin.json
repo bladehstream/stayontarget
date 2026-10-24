@@ -1,6 +1,6 @@
 {
   "name": "stayontarget",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Keeps the agent on the requested scope: grades every change against what you asked for.",
   "author": { "name": "bladehstream" },
   "license": "MIT",

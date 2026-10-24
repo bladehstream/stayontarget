@@ -1,10 +1,10 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
-import type { Allowance, DriftEvent, UiState } from '../types'
+import type { Allowance, DriftEvent, ReadAs, UiState } from '../types'
 
-import type { ScopeList } from './charter'
-import { addScopeItem, editGoal, removeScopeItem, startNewTask } from './charter'
+import type { ReadAsChoice, ReadAsDollar, ScopeList } from './charter'
+import { addScopeItem, answerReadAs, editGoal, removeScopeItem, startNewTask } from './charter'
 import { clearVerdictCache } from './judge'
 import { messageOf } from './model'
 import { currentStatus } from './status'
@@ -14,11 +14,13 @@ import { currentStatus } from './status'
 const allowancesAtom = atom({ plugin: 'stayontarget', key: 'allowances' } as const, [] as Allowance[])
 const eventsAtom = atom({ plugin: 'stayontarget', key: 'events' } as const, [] as DriftEvent[])
 const uiAtom = atom({ plugin: 'stayontarget', key: 'ui' } as const, { expandedEventId: null, view: 'events' } as UiState)
-export const __atoms = { allowancesAtom, eventsAtom, uiAtom }
+const readAsAtom = atom({ plugin: 'stayontarget', key: 'readAs' } as const, null as ReadAs | null)
+export const __atoms = { allowancesAtom, eventsAtom, uiAtom, readAsAtom }
 
-// The engine nouns the handlers use: the state (through read and update), the status line and the debug log. A pane's
-// handler gets no clock, so nothing here reads the time.
-export type ActionDollar = Pick<EngineInterface, 'state' | 'ui'>
+// The engine nouns the handlers use: the state (through read and update), the status line, the debug log and the clock.
+// The clock is read by the "Read as" corrections (FR-CH-10: a new task's creation time) and by the render that draws
+// their buttons (the time a reading is shown for); a handler that does not need it simply does not read it.
+export type ActionDollar = Pick<EngineInterface, 'clock' | 'state' | 'ui'>
 // The mode handler also writes the setting (FR-UI-10); nothing else calls `config.set`.
 export type ModeDollar = Pick<EngineInterface, 'config' | 'ui'>
 
@@ -145,4 +147,31 @@ export async function newTask($: ActionDollar): Promise<void> {
     logFailure($, 'new task not started', err)
   }
   await refreshStatus($)
+}
+
+// FR-CH-10: one answer to the "Read as" line. The charter write is CAS-checked in src/charter.ts; the verdict cache is
+// dropped only when the charter was written, since a restored charter can share an id and rev with cached verdicts.
+async function answerRead($: ReadAsDollar, choice: ReadAsChoice): Promise<void> {
+  try {
+    if (await answerReadAs($, choice, await $.clock.now())) clearVerdictCache()
+  } catch (err) {
+    logFailure($, 'read-as answer not applied', err)
+  }
+  await refreshStatus($)
+}
+
+export function correctAsNewTask($: ReadAsDollar): Promise<void> {
+  return answerRead($, 'new-task')
+}
+
+export function correctAsSameTask($: ReadAsDollar): Promise<void> {
+  return answerRead($, 'same-task')
+}
+
+export function correctAsNoChange($: ReadAsDollar): Promise<void> {
+  return answerRead($, 'no-change')
+}
+
+export function acceptReading($: ReadAsDollar): Promise<void> {
+  return answerRead($, 'accept')
 }

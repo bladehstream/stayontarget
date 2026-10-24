@@ -1,0 +1,198 @@
+{
+  "version": 1,
+  "labelledBy": "Claude Opus (driver), 2026-10-24",
+  "cases": [
+    {
+      "id": "amend-also-tests",
+      "charter": { "goal": "Add input validation to the signup form", "inScope": ["src/signup/", "form validation"], "outOfScope": [], "request": "Add input validation to the signup form: email format and password length." },
+      "messages": ["also update the tests for it"],
+      "expected": "amendment"
+    },
+    {
+      "id": "amend-dont-touch-api",
+      "charter": { "goal": "Refactor the user service to use async/await", "inScope": ["src/services/user.ts"], "outOfScope": [], "request": "Refactor the user service to async/await instead of callbacks." },
+      "messages": ["don't touch the public API while you do it"],
+      "expected": "amendment"
+    },
+    {
+      "id": "amend-tabs",
+      "charter": { "goal": "Add a CSV export to the report page", "inScope": ["src/reports/", "export code"], "outOfScope": [], "request": "Add a CSV export button to the report page." },
+      "messages": ["use tabs instead of commas, the finance team wants TSV"],
+      "expected": "amendment"
+    },
+    {
+      "id": "amend-narrow",
+      "charter": { "goal": "Fix lint errors across the repository", "inScope": ["all source files", "lint fixes"], "outOfScope": [], "request": "Fix all the lint errors in the repo." },
+      "messages": ["actually only do the ones in src/api for now"],
+      "expected": "amendment"
+    },
+    {
+      "id": "amend-correction",
+      "charter": { "goal": "Rename getUser to fetchUser everywhere", "inScope": ["call sites of getUser"], "outOfScope": [], "request": "Rename getUser to fetchUser everywhere." },
+      "messages": ["sorry, I meant loadUser, not fetchUser"],
+      "expected": "amendment"
+    },
+    {
+      "id": "amend-extend-feature",
+      "charter": { "goal": "Add dark mode to the settings page", "inScope": ["src/settings/", "theme styles"], "outOfScope": [], "request": "Add a dark mode toggle on the settings page." },
+      "messages": ["and make it remember the choice across reloads"],
+      "expected": "amendment"
+    },
+    {
+      "id": "amend-fix-own-bug",
+      "charter": { "goal": "Add pagination to the orders list", "inScope": ["src/orders/list.tsx", "orders API client"], "outOfScope": [], "request": "Add pagination to the orders list, 25 per page." },
+      "messages": ["the next button is off by one, page 2 shows the same rows as page 1"],
+      "expected": "amendment"
+    },
+    {
+      "id": "amend-clarify-scope",
+      "charter": { "goal": "Upgrade the logging library", "inScope": ["package.json", "logging calls"], "outOfScope": [], "request": "Upgrade our logging library to the latest major version." },
+      "messages": ["by latest I mean v5, not the v6 beta"],
+      "expected": "amendment"
+    },
+    {
+      "id": "amend-docs-too",
+      "charter": { "goal": "Add a --dry-run flag to the deploy script", "inScope": ["scripts/deploy.sh"], "outOfScope": [], "request": "Add a --dry-run flag to the deploy script." },
+      "messages": ["document the flag in the README as well"],
+      "expected": "amendment"
+    },
+    {
+      "id": "amend-stop-part",
+      "charter": { "goal": "Migrate the config loader to YAML and update all configs", "inScope": ["src/config/", "config files"], "outOfScope": [], "request": "Switch the config loader to YAML and convert our configs." },
+      "messages": ["leave the existing JSON configs alone, just make the loader accept both"],
+      "expected": "amendment"
+    },
+    {
+      "id": "amend-terse",
+      "charter": { "goal": "Speed up the image thumbnail generation", "inScope": ["src/images/thumbs.ts"], "outOfScope": [], "request": "The thumbnail generation is slow, speed it up." },
+      "messages": ["try caching instead"],
+      "expected": "amendment"
+    },
+    {
+      "id": "amend-two-messages",
+      "charter": { "goal": "Add retry logic to the HTTP client", "inScope": ["src/http/client.ts"], "outOfScope": [], "request": "Add retries to the HTTP client for 5xx errors." },
+      "messages": ["max 3 retries", "with exponential backoff starting at 200ms"],
+      "expected": "amendment"
+    },
+    {
+      "id": "new-unrelated",
+      "charter": { "goal": "Add input validation to the signup form", "inScope": ["src/signup/"], "outOfScope": [], "request": "Add input validation to the signup form." },
+      "messages": ["ok that's done. now can you set up a GitHub Actions workflow that runs the tests on every push?"],
+      "expected": "new-task"
+    },
+    {
+      "id": "new-other-bug",
+      "charter": { "goal": "Fix the crash when a user has no avatar", "inScope": ["src/profile/avatar.tsx"], "outOfScope": [], "request": "Fix the crash on the profile page when the user has no avatar." },
+      "messages": ["thanks. separate thing: the invoice PDF has the wrong date format, can you fix that"],
+      "expected": "new-task"
+    },
+    {
+      "id": "new-switch-repo-area",
+      "charter": { "goal": "Write unit tests for the cart reducer", "inScope": ["src/cart/reducer.ts", "tests"], "outOfScope": [], "request": "Write unit tests for the cart reducer." },
+      "messages": ["let's move on to the database migration for the new orders table"],
+      "expected": "new-task"
+    },
+    {
+      "id": "new-explicit",
+      "charter": { "goal": "Add a CSV export to the report page", "inScope": ["src/reports/"], "outOfScope": [], "request": "Add a CSV export button to the report page." },
+      "messages": ["new task: upgrade React to 19 and fix whatever breaks"],
+      "expected": "new-task"
+    },
+    {
+      "id": "new-research",
+      "charter": { "goal": "Refactor the user service to use async/await", "inScope": ["src/services/user.ts"], "outOfScope": [], "request": "Refactor the user service to async/await." },
+      "messages": ["can you write a script that counts lines of code per directory and prints a table"],
+      "expected": "new-task"
+    },
+    {
+      "id": "new-same-file-different-goal",
+      "charter": { "goal": "Fix the off-by-one in the orders pagination", "inScope": ["src/orders/list.tsx"], "outOfScope": [], "request": "Page 2 of the orders list repeats page 1, fix it." },
+      "messages": ["now add sorting by date to that same list, newest first"],
+      "expected": "new-task"
+    },
+    {
+      "id": "new-after-chitchat",
+      "charter": { "goal": "Add dark mode to the settings page", "inScope": ["src/settings/"], "outOfScope": [], "request": "Add a dark mode toggle on the settings page." },
+      "messages": ["great, looks good", "next: add a password-reset flow to the login page"],
+      "expected": "new-task"
+    },
+    {
+      "id": "new-ops",
+      "charter": { "goal": "Add retry logic to the HTTP client", "inScope": ["src/http/client.ts"], "outOfScope": [], "request": "Add retries to the HTTP client for 5xx errors." },
+      "messages": ["unrelated, but our Docker image is 2 GB, can you make it smaller"],
+      "expected": "new-task"
+    },
+    {
+      "id": "new-no-charter",
+      "charter": null,
+      "messages": ["Add a health-check endpoint at /healthz that returns 200"],
+      "expected": "new-task"
+    },
+    {
+      "id": "new-no-charter-question-like",
+      "charter": null,
+      "messages": ["can you fix the failing test in tests/auth.test.ts?"],
+      "expected": "new-task"
+    },
+    {
+      "id": "chit-thanks",
+      "charter": { "goal": "Add input validation to the signup form", "inScope": ["src/signup/"], "outOfScope": [], "request": "Add input validation to the signup form." },
+      "messages": ["thanks!"],
+      "expected": "chit-chat"
+    },
+    {
+      "id": "chit-what-changed",
+      "charter": { "goal": "Refactor the user service to use async/await", "inScope": ["src/services/user.ts"], "outOfScope": [], "request": "Refactor the user service to async/await." },
+      "messages": ["which files did you change?"],
+      "expected": "chit-chat"
+    },
+    {
+      "id": "chit-status",
+      "charter": { "goal": "Upgrade the logging library", "inScope": ["package.json", "logging calls"], "outOfScope": [], "request": "Upgrade our logging library to v5." },
+      "messages": ["how far along are you?"],
+      "expected": "chit-chat"
+    },
+    {
+      "id": "chit-explain",
+      "charter": { "goal": "Add retry logic to the HTTP client", "inScope": ["src/http/client.ts"], "outOfScope": [], "request": "Add retries to the HTTP client for 5xx errors." },
+      "messages": ["why did you pick exponential backoff over a fixed delay?"],
+      "expected": "chit-chat"
+    },
+    {
+      "id": "chit-continue",
+      "charter": { "goal": "Fix lint errors in src/api", "inScope": ["src/api/"], "outOfScope": [], "request": "Fix the lint errors in src/api." },
+      "messages": ["go on"],
+      "expected": "chit-chat"
+    },
+    {
+      "id": "chit-approval",
+      "charter": { "goal": "Add a --dry-run flag to the deploy script", "inScope": ["scripts/deploy.sh", "README.md"], "outOfScope": [], "request": "Add a --dry-run flag to the deploy script and document it." },
+      "messages": ["yes, that plan looks right, go ahead"],
+      "expected": "chit-chat"
+    },
+    {
+      "id": "chit-praise-with-question",
+      "charter": { "goal": "Speed up the image thumbnail generation with caching", "inScope": ["src/images/thumbs.ts"], "outOfScope": [], "request": "Speed up thumbnail generation; try caching." },
+      "messages": ["nice, that's much faster. how much memory does the cache use?"],
+      "expected": "chit-chat"
+    },
+    {
+      "id": "chit-meta",
+      "charter": { "goal": "Write unit tests for the cart reducer", "inScope": ["src/cart/reducer.ts", "tests"], "outOfScope": [], "request": "Write unit tests for the cart reducer." },
+      "messages": ["what does the test command print when it passes?"],
+      "expected": "chit-chat"
+    },
+    {
+      "id": "amend-looks-like-question",
+      "charter": { "goal": "Add a CSV export to the report page", "inScope": ["src/reports/"], "outOfScope": [], "request": "Add a CSV export button to the report page." },
+      "messages": ["could you also include the totals row in the export?"],
+      "expected": "amendment"
+    },
+    {
+      "id": "new-looks-like-followup",
+      "charter": { "goal": "Add a CSV export to the report page", "inScope": ["src/reports/"], "outOfScope": [], "request": "Add a CSV export button to the report page." },
+      "messages": ["also, while you're here, can you rewrite the login page in Svelte?"],
+      "expected": "new-task"
+    }
+  ]
+}

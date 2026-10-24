@@ -1,28 +1,34 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, StateDollar } from 'claude-code'
 
-import type { Charter } from '../types'
+import type { Charter, ReadAs } from '../types'
 
 import { REDACT_WINDOW_MARGIN } from './action'
 import type { Config } from './config'
+import { oneLine } from './events'
 import { callModel, messageOf, parseJsonObject } from './model'
 import type { ModelOutcome } from './model'
 import { CHARTER_INSTRUCTIONS } from './prompts'
 import { redactText } from './redact'
-import { EMPTY_STATS } from './state'
+import { EMPTY_STATS, READ_AS_MAX_AGE_MS } from './state'
 
 // The engine's scan needs each atom in the file that reads or writes it, so the atoms are declared here. Ref and initial
 // value match src/state.ts; the wiring test checks that they do.
 const charterAtom = atom({ plugin: 'stayontarget', key: 'charter' } as const, null as Charter | null)
 const statsAtom = atom({ plugin: 'stayontarget', key: 'stats' } as const, EMPTY_STATS)
-export const __atoms = { charterAtom, statsAtom }
+const readAsAtom = atom({ plugin: 'stayontarget', key: 'readAs' } as const, null as ReadAs | null)
+export const __atoms = { charterAtom, statsAtom, readAsAtom }
 
 // The engine nouns the charter lifecycle uses: the model and clock (through callModel), the state (through read and
 // update) and the debug log. Each function takes the narrowest slice it needs.
 export type CharterDollar = Pick<EngineInterface, 'model' | 'clock' | 'state' | 'ui'>
 type TurnDollar = Pick<EngineInterface, 'state' | 'ui'>
+// The "Read as" corrections (FR-CH-10): the state, the clock for a new task's creation time, and the debug log.
+export type ReadAsDollar = Pick<EngineInterface, 'clock' | 'state' | 'ui'>
 
 const ENTRY_MAX = 4000
+// FR-CH-10: the head of the text a reading read, cut to this many characters.
+const READ_AS_HEAD = 80
 const SKILL_MAX = 1500
 const SKILL_WINDOW_MS = 10 * 60 * 1000
 const ITEM_MAX = 200
@@ -35,7 +41,7 @@ const PENDING_MAX = 16
 const CHARTER_DEADLINE_MS = 8000
 // The shortest time left for a recompute to be worth a model call (FR-VD-6 budget).
 const RECOMPUTE_MIN_MS = 1000
-const CHARTER_MAX_TOKENS = 400
+export const CHARTER_MAX_TOKENS = 400
 const AMENDMENT_SEPARATOR = '\n---\n'
 const KINDS: readonly string[] = ['new-task', 'amendment', 'chit-chat']
 
@@ -49,6 +55,8 @@ type Attempt = { reply: Distilled | null; detail: string; usage: Usage }
 // The command mark and the skill body it may capture. Module-level, not state: they live between two hook calls only.
 let commandMarkAt: number | null = null
 let skillBody: string | null = null
+// FR-CH-10: counts the main turns started. A reading recorded under one turn is not shown once a later turn has started.
+let turnGeneration = 0
 
 // Redacts a window of the text, as action.ts does, so a secret cut at the bound is still seen. Keeps at most `max`.
 // `cut` says the text itself was truncated before it got here (the caller sliced it), so its end may be mid-secret.
@@ -91,6 +99,9 @@ export async function onMainTurnStart($: TurnDollar, text: string, now: number):
   const body = skillBody
   commandMarkAt = null
   skillBody = null
+  turnGeneration += 1
+  // FR-CH-10: a new main turn takes the "Read as" line away.
+  await clearReadAs($)
   try {
     const head = text.slice(0, ENTRY_MAX + REDACT_WINDOW_MARGIN)
     if (head.trim() === '') return
@@ -290,7 +301,9 @@ async function ask($: CharterDollar, cfg: Config, base: Charter, deadlineMs: num
   return reply === null ? { reply: null, detail: 'invalid reply', usage } : { reply, detail: reply.kind, usage }
 }
 
-function askBody(charter: Charter): string {
+// The charter prompt's body for a charter and its pending text (no state): what ensureCharter sends, and what the charter
+// eval sends for each case (FR-EV-3).
+export function askBody(charter: Charter): string {
   const current =
     noTaskYet(charter)
       ? 'none'
@@ -315,7 +328,8 @@ function stringList(value: unknown): string[] | null {
   return items.map(item => clean(item))
 }
 
-function parseReply(text: string): Distilled | null {
+// The model's reply as a charter update reads it, or null when it is not one (no state). The eval scores its `kind`.
+export function parseReply(text: string): Distilled | null {
   const value = parseJsonObject(text)
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
   const fields = value as Record<string, unknown>
@@ -360,8 +374,20 @@ function withItems(charter: Charter, list: ScopeList, items: string[]): Charter 
   }
 }
 
+// The charter without its forced reading: an applied update consumes the field (FR-CH-10). Returns the same object when
+// there is none to drop.
+function unforced(charter: Charter): Charter {
+  if (charter.forcedReading === undefined) return charter
+  const { forcedReading: _consumed, ...rest } = charter
+  return rest
+}
+
 // Applies a reply (or the failure) to the charter the attempt was based on. Pure: the update may run it more than once.
 function applyAttempt(current: Charter, reply: Distilled | null, freshId: string, now: number): Charter {
+  return unforced(applyReply(current, reply, freshId, now))
+}
+
+function applyReply(current: Charter, reply: Distilled | null, freshId: string, now: number): Charter {
   const pending = current.pendingText.join('\n')
   const first = noTaskYet(current)
 
@@ -373,7 +399,8 @@ function applyAttempt(current: Charter, reply: Distilled | null, freshId: string
 
   // A charter with no task yet has its first reply as a new task (FR-CH-4). It keeps its id, its createdAt and any
   // field the person edited; only the fields the person did not edit take the reply.
-  const kind: Kind = first ? 'new-task' : reply.kind
+  // FR-CH-10: a `Same task` correction's forced reading stands in for the model's kind, for this one update.
+  const kind: Kind = first ? 'new-task' : (current.forcedReading ?? reply.kind)
   if (kind === 'chit-chat') return { ...current, pendingText: [] }
 
   if (kind === 'new-task' && first) {
@@ -417,7 +444,8 @@ function applyAttempt(current: Charter, reply: Distilled | null, freshId: string
   }
 }
 
-// Commits the attempt only if its base is still current. The flag is read from the last run of the update.
+// Commits the attempt only if its base is still current. The flag is read from the last run of the update. An applied
+// reading of a charter that had a task is recorded for the "Read as" line (FR-CH-10), in its own write after the commit.
 async function commit(
   $: CharterDollar,
   base: Charter,
@@ -425,16 +453,191 @@ async function commit(
   now: number,
 ): Promise<{ applied: boolean; charter: Charter | null }> {
   const freshId = crypto.randomUUID()
-  const result: { applied: boolean } = { applied: false }
+  // The turn the update started under: a reading is recorded only if no main turn has started since (FR-CH-10).
+  const generation = turnGeneration
+  const result: { applied: boolean; before: Charter | null; consumed: string[]; reading: Kind | null } = {
+    applied: false,
+    before: null,
+    consumed: [],
+    reading: null,
+  }
   const charter = await update($, charterAtom, current => {
     if (current === null || !sameBase(current, base)) {
       result.applied = false
+      result.before = null
+      result.reading = null
       return current
     }
     result.applied = true
+    // The charter as the update found it, without the text it consumes: what a restore brings back (FR-CH-10).
+    result.before = unforced({ ...current, pendingText: [] })
+    result.consumed = [...current.pendingText]
+    // A forced reading is the person's own answer (a `Same task`): it is not a reading to show again (FR-CH-10).
+    result.reading = noTaskYet(current) || reply === null || current.forcedReading !== undefined ? null : reply.kind
     return applyAttempt(current, reply, freshId, now)
   })
+  if (result.applied && result.before !== null && result.reading !== null && result.reading !== 'chit-chat') {
+    await rememberReading($, result.before, result.consumed, result.reading, charter, now, generation)
+  }
   return { applied: result.applied, charter }
+}
+
+// FR-CH-10: records the reading an applied update made, against the charter it read. Its own write: a failure is logged
+// and the line is not shown, so nothing waits on it.
+async function rememberReading(
+  $: CharterDollar,
+  before: Charter,
+  consumed: string[],
+  reading: 'new-task' | 'amendment',
+  after: Charter | null,
+  now: number,
+  generation: number,
+): Promise<void> {
+  if (after === null) return
+  const head = redactedBound(oneLine(consumed.join(' ')), READ_AS_HEAD)
+  const record: ReadAs = {
+    reading,
+    head,
+    before,
+    consumed: [...consumed],
+    afterId: after.id,
+    afterRev: after.rev,
+    at: now,
+  }
+  try {
+    // Written only while the charter is still the one committed, with no text delivered since, and no main turn has started
+    // (F1). A check that passed before a turn started is caught by the callback, which re-runs on a version conflict.
+    const current = await read($, charterAtom)
+    if (generation !== turnGeneration || current === null || !isCommitted(current, after)) return
+    await update($, readAsAtom, value => (generation === turnGeneration ? record : value))
+    // A turn that started while the write was in flight: the write landed after that turn's clear, so it comes out again.
+    if (generation !== turnGeneration) await clearIfStill($, record)
+  } catch (err) {
+    $.ui.log(`stayontarget: read-as not recorded: ${messageOf(err)}`, { to: 'debug' })
+    return
+  }
+  // FR-CH-10: the line expires ten minutes after its reading, with no redraw needed. The expiry clears the line only while it
+  // is still this reading; the render's own age check stays as the second guard.
+  $.clock.after(READ_AS_MAX_AGE_MS, () => {
+    void clearIfStill($, record)
+  })
+}
+
+// FR-CH-10: whether the charter is the one a reading committed: the same id and rev, and no pending text since.
+function isCommitted(current: Charter, after: Charter): boolean {
+  return current.id === after.id && current.rev === after.rev && current.pendingText.length === 0
+}
+
+// FR-CH-10: clears the reading `record` if it still stands; a newer reading (another at, id or rev) is left alone.
+async function clearIfStill($: Pick<EngineInterface, 'state' | 'ui'>, record: ReadAs): Promise<void> {
+  try {
+    await update($, readAsAtom, current =>
+      current !== null && current.at === record.at && current.afterId === record.afterId && current.afterRev === record.afterRev
+        ? null
+        : current,
+    )
+  } catch (err) {
+    $.ui.log(`stayontarget: read-as not cleared: ${messageOf(err)}`, { to: 'debug' })
+  }
+}
+
+// FR-CH-10: the "Read as" line goes. Nothing is written when it is not there; a failed write is logged, as a failed
+// write of any state is.
+async function clearReadAs($: Pick<EngineInterface, 'state' | 'ui'>): Promise<void> {
+  try {
+    if ((await read($, readAsAtom)) !== null) await update($, readAsAtom, () => null)
+  } catch (err) {
+    $.ui.log(`stayontarget: read-as not cleared: ${messageOf(err)}`, { to: 'debug' })
+  }
+}
+
+export type ReadAsChoice = 'new-task' | 'same-task' | 'no-change' | 'accept'
+
+// FR-CH-10: the charter a correction writes, from the reading it answers. Pure.
+function correctedCharter(readAs: ReadAs, choice: Exclude<ReadAsChoice, 'accept'>, now: number): Charter {
+  if (choice === 'new-task') {
+    return {
+      id: crypto.randomUUID(),
+      rev: 0,
+      request: '',
+      goal: null,
+      inScope: [],
+      outOfScope: [],
+      distilled: false,
+      editedFields: [],
+      pendingText: [...readAs.consumed],
+      createdAt: now,
+    }
+  }
+  if (choice === 'same-task') {
+    const pendingText = readAs.consumed.reduce((list, entry) => appendPending(list, entry).list, readAs.before.pendingText)
+    return { ...readAs.before, pendingText, forcedReading: 'amendment' }
+  }
+  return readAs.before
+}
+
+// FR-CH-10: the person's answer to the "Read as" line. A correction is a CAS write against the charter the reading left
+// (its id and rev); when the charter has moved on, the charter is left alone. The line goes in every case. Resolves true
+// when the charter was written.
+export async function answerReadAs($: ReadAsDollar, choice: ReadAsChoice, now: number): Promise<boolean> {
+  const readAs = await read($, readAsAtom)
+  if (readAs === null) return false
+  const result = { written: false }
+  try {
+    if (now - readAs.at > READ_AS_MAX_AGE_MS) {
+      // FR-CH-10: a reading past its ten minutes is not corrected; the line goes, as its expiry would take it.
+      $.ui.log(`stayontarget: read-as correction skipped: reading expired`, { to: 'debug' })
+    } else if (choice !== 'accept') {
+      await update($, charterAtom, current => {
+        // The charter must be the one the reading left, with no text delivered since (its pending text empty, as the commit
+        // left it): a correction would otherwise discard that text.
+        const same =
+          current !== null && current.id === readAs.afterId && current.rev === readAs.afterRev && current.pendingText.length === 0
+        result.written = same
+        return same ? correctedCharter(readAs, choice, now) : current
+      })
+      if (!result.written) $.ui.log(`stayontarget: read-as correction skipped: charter changed`, { to: 'debug' })
+    }
+  } finally {
+    // Only the reading answered goes: a newer one recorded while this correction waited keeps the line (F2).
+    await clearIfStill($, readAs)
+  }
+  return result.written
+}
+
+// FR-CH-10 and FR-EV-3: a charter for the eval's case, bounded and redacted as the production update bounds what it is
+// given: the case's fields as the charter holds them, and its messages as pending entries. A case with no charter has
+// no task (its request is empty), so its prompt says "none".
+export function charterOfCase(
+  id: string,
+  base: { goal: string; inScope: string[]; outOfScope: string[]; request: string } | null,
+  messages: string[],
+): Charter {
+  const pendingText = messages.reduce((list: string[], message) => {
+    const head = message.slice(0, ENTRY_MAX + REDACT_WINDOW_MARGIN)
+    return appendPending(list, redactedBound(head, ENTRY_MAX, message.length > head.length)).list
+  }, [])
+  const charter: Charter = {
+    id,
+    rev: 1,
+    request: '',
+    goal: null,
+    inScope: [],
+    outOfScope: [],
+    distilled: false,
+    editedFields: [],
+    pendingText,
+    createdAt: 0,
+  }
+  if (base === null) return charter
+  return {
+    ...charter,
+    request: redactedBound(base.request, REQUEST_MAX),
+    goal: clean(base.goal),
+    inScope: base.inScope.map(clean),
+    outOfScope: base.outOfScope.map(clean),
+    distilled: true,
+  }
 }
 
 // Tokens count whether or not the attempt was applied; the outcome counters count only an applied one.

@@ -20,7 +20,7 @@ import { printable } from '../src/text'
 import { rememberFooter, renderBand, renderFooter, renderToolBadge } from '../src/marks'
 import { resetSessionState, restore, resumePersist, saveNow, schedulePersist, sessionEndDeadline, suspendPersist } from '../src/persist'
 import { awaitVerdict, forgetVerdict, hasVerdict, startVerdict } from '../src/registry'
-import { formatReport, parseCases, runEval } from '../src/evaluate'
+import { formatCharterReport, formatReport, parseCases, parseCharterCases, runCharterEval, runEval } from '../src/evaluate'
 
 // The verdict wait of tool.call: inside its 10 s budget with a second to spare (FR-VD-8, spike S2).
 const VERDICT_WAIT_MS = 7000
@@ -41,8 +41,10 @@ export function boundedCwd(cwd: string | null): string | null {
 }
 // The command's argument is read this far at most: the first word is all it uses.
 const COMMAND_ARG_MAX = 64
-// FR-EV-2: the labelled cases the eval runs, under the plugin's root.
+// FR-EV-2: the labelled cases the drift eval runs, under the plugin's root.
 const EVAL_FILE = 'evals/drift-cases.json'
+// FR-EV-3: the labelled cases the charter eval runs, under the plugin's root.
+const CHARTER_EVAL_FILE = 'evals/charter-cases.json'
 
 type Logged = Pick<EngineInterface, 'ui'>
 // `cwd` is the directory the call ran in, as tool.check read it: a link to a relative target is taken from it (FR-UI-10).
@@ -136,9 +138,20 @@ async function markNone($: CharterDollar, toolUseId: string): Promise<void> {
   }
 }
 
-// FR-EV-1, FR-EV-2: reads the labelled cases, runs them through the production judge and answers the report. A read or
-// parse failure answers its reason instead.
+// FR-EV-1, FR-EV-2, FR-EV-3: runs the drift eval, then the charter eval, and answers both reports. Each reads and runs on its
+// own, so a bad charter file leaves the drift report and a bad drift file leaves the charter report.
 async function evalText(
+  $: Pick<EngineInterface, 'clock' | 'fs' | 'model' | 'plugin' | 'ui'>,
+  cfg: Config,
+  signal: AbortSignal,
+): Promise<string> {
+  const drift = await driftReport($, cfg, signal)
+  const charter = await charterReport($, cfg, signal)
+  return `${drift}\n\n${charter}`
+}
+
+// A read or parse failure answers its reason instead of a report.
+async function driftReport(
   $: Pick<EngineInterface, 'clock' | 'fs' | 'model' | 'plugin' | 'ui'>,
   cfg: Config,
   signal: AbortSignal,
@@ -148,6 +161,20 @@ async function evalText(
     return formatReport(await runEval($, cfg, cases, signal))
   } catch (err) {
     return `stayontarget eval: ${messageOf(err)}`
+  }
+}
+
+// FR-EV-3: the charter section; a read or parse failure is its reason, under the section's heading.
+async function charterReport(
+  $: Pick<EngineInterface, 'clock' | 'fs' | 'model' | 'plugin' | 'ui'>,
+  cfg: Config,
+  signal: AbortSignal,
+): Promise<string> {
+  try {
+    const cases = parseCharterCases(await $.fs.read(`${$.plugin.root}/${CHARTER_EVAL_FILE}`))
+    return formatCharterReport(await runCharterEval($, cfg, cases, signal))
+  } catch (err) {
+    return `## Charter classification\n\nNot run: ${messageOf(err)}`
   }
 }
 
@@ -170,7 +197,7 @@ export const register: Register = (on, options) => {
     try {
       await $.command.register({
         name: 'stayontarget',
-        description: 'Show the stayontarget pane; "new" starts a new task; "eval" runs the drift eval',
+        description: 'Show the stayontarget pane; "new" starts a new task; "eval" runs the drift and charter evals',
       })
     } catch (err) {
       logFailure($, 'command not registered', err)
@@ -211,10 +238,10 @@ export const register: Register = (on, options) => {
   // `StateWrite = StateAddress & { value, … }` with `StateAddress.plugin` (docs/api/claude-code-2.1.309.d.ts), so a matcher
   // on `plugin` sees every write, and one hook covers every call site. The write passes through unchanged. A refused write
   // schedules too: the write that refused it landed, and the save coalesces the two.
-  // The expanded event is view state (FR-UI-10): it is not in a snapshot, so its writes schedule none.
+  // The expanded event (FR-UI-10) and the "Read as" line (FR-CH-10) are view state: not in a snapshot, so their writes schedule none.
   on('state.set', { plugin: 'stayontarget' }, async ($, e, next) => {
     const r = await next(e)
-    if (e.key !== 'ui') schedulePersist($)
+    if (e.key !== 'ui' && e.key !== 'readAs') schedulePersist($)
     return r
   })
 

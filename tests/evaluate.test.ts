@@ -3,8 +3,15 @@ import type { ModelCompleteRequest, ModelCompleteResult, ModelTextBlock } from '
 
 import { extractAction } from '../src/action'
 import { DEFAULT_CONFIG } from '../src/config'
-import type { EvalCase, EvalReport } from '../src/evaluate'
-import { formatReport, parseCases, runEval } from '../src/evaluate'
+import type { CharterCase, EvalCase, EvalReport } from '../src/evaluate'
+import {
+  formatCharterReport,
+  formatReport,
+  parseCases,
+  parseCharterCases,
+  runCharterEval,
+  runEval,
+} from '../src/evaluate'
 import type { JudgeDollar } from '../src/judge'
 import { CONCURRENCY } from '../src/model'
 
@@ -339,4 +346,176 @@ test('/stayontarget eval says why when the eval file does not parse (FR-EV-1, FR
   const text = (await $.command.run({ command: 'stayontarget', args: 'eval', ...RUN })).text ?? ''
 
   expect(text).toContain('stayontarget eval: eval case "x": charter must be an object')
+})
+
+// FR-EV-3: the charter eval file's shape, as evals/charter-cases.json has it, with three of its cases (a null charter among
+// them). parseCharterCases is tested on this sample, since a test body has no file system to read the real file from.
+const CHARTER_SAMPLE = JSON.stringify({
+  version: 1,
+  cases: [
+    {
+      id: 'amend-also-tests',
+      charter: {
+        goal: 'Add input validation to the signup form',
+        inScope: ['src/signup/', 'form validation'],
+        outOfScope: [],
+        request: 'Add input validation to the signup form: email format and password length.',
+      },
+      messages: ['also update the tests for it'],
+      expected: 'amendment',
+    },
+    {
+      id: 'new-no-charter',
+      charter: null,
+      messages: ['Add a health-check endpoint at /healthz that returns 200'],
+      expected: 'new-task',
+    },
+    {
+      id: 'chit-thanks',
+      charter: { goal: 'Add a CSV export', inScope: [], outOfScope: [], request: 'Add a CSV export button.' },
+      messages: ['thanks, that looks good'],
+      expected: 'chit-chat',
+    },
+  ],
+})
+
+const CHARTER_CASE = (id: string, over: Record<string, unknown> = {}): Record<string, unknown> => ({
+  id,
+  charter: null,
+  messages: ['also add tests'],
+  expected: 'amendment',
+  ...over,
+})
+
+test('parseCharterCases accepts the eval file shape, a null charter included (FR-EV-3)', () => {
+  const cases = parseCharterCases(CHARTER_SAMPLE)
+
+  expect(cases.map(c => c.id)).toEqual(['amend-also-tests', 'new-no-charter', 'chit-thanks'])
+  expect(cases[0]?.charter?.inScope).toEqual(['src/signup/', 'form validation'])
+  expect(cases[1]?.charter).toBeNull()
+  expect(cases[2]?.expected).toBe('chit-chat')
+})
+
+test('parseCharterCases rejects a bad case and names its id (FR-EV-3)', () => {
+  const bad = (cases: Record<string, unknown>[]) => () => parseCharterCases(JSON.stringify({ cases }))
+
+  // The case helpers are shared with the drift file, so a bad charter case is named by its id in the same words.
+  expect(bad([CHARTER_CASE('a', { messages: [] })])).toThrow('eval case "a": messages must not be empty')
+  expect(bad([CHARTER_CASE('b', { expected: 'new-task ' })])).toThrow('eval case "b": expected must be')
+  expect(bad([CHARTER_CASE('c', { charter: { goal: 'g', inScope: [], outOfScope: [] } })])).toThrow(
+    'eval case "c": charter.request must be a non-empty string',
+  )
+  expect(bad([CHARTER_CASE('d', { charter: 'none' })])).toThrow('eval case "d": charter must be null or an object')
+  expect(bad([CHARTER_CASE('e'), CHARTER_CASE('e')])).toThrow('eval case "e": duplicate id')
+  expect(bad([CHARTER_CASE('f', { messages: 'also add tests' })])).toThrow('eval case "f": messages must be a list')
+})
+
+test('parseCharterCases rejects text that is not JSON, and a file with no cases (FR-EV-3)', () => {
+  expect(() => parseCharterCases('{ nope')).toThrow('charter eval file is not JSON')
+  expect(() => parseCharterCases('{"cases": []}')).toThrow('charter eval file has no "cases" list')
+})
+
+// A fake judge dollar for the charter eval: the reply is keyed on the new messages the case sends.
+function fakeCharterJudge(): JudgeDollar {
+  return {
+    model: {
+      complete: async (request: ModelCompleteRequest) => {
+        const body = textOf(request.prompt[1])
+        if (body.includes('also add tests')) return said({ kind: 'amendment', goal: 'g', inScope: [], outOfScope: [] })
+        if (body.includes('thanks')) return said({ kind: 'chit-chat', goal: 'g', inScope: [], outOfScope: [] })
+        if (body.includes('unrelated work')) return said({ kind: 'new-task', goal: 'g', inScope: [], outOfScope: [] })
+        if (body.includes('garbled')) return { isAnswered: true, text: 'not json', usage: USAGE }
+        return failed
+      },
+    },
+    clock: {
+      now: async () => 0,
+      sleep: () => new Promise<void>(() => {}),
+    },
+    ui: { log: () => {} },
+  } as unknown as JudgeDollar
+}
+
+// Six cases: four classified as labelled, one as the wrong kind, and two unchecked (an invalid reply, a failed call).
+const CHARTER_MIX = (): CharterCase[] => [
+  { id: 'c1', charter: null, messages: ['also add tests'], expected: 'amendment' },
+  { id: 'c2', charter: null, messages: ['unrelated work'], expected: 'amendment' },
+  { id: 'c3', charter: null, messages: ['thanks'], expected: 'chit-chat' },
+  { id: 'c4', charter: null, messages: ['unrelated work'], expected: 'new-task' },
+  { id: 'c5', charter: null, messages: ['garbled'], expected: 'new-task' },
+  { id: 'c6', charter: null, messages: ['boom'], expected: 'chit-chat' },
+]
+
+test('runCharterEval builds the matrix with an unchecked column, precision and recall per kind (FR-EV-3)', async () => {
+  const report = await runCharterEval(fakeCharterJudge(), DEFAULT_CONFIG, CHARTER_MIX())
+
+  expect(report.total).toBe(6)
+  expect(report.accuracy).toBe(0.5)
+  expect(report.unchecked).toBe(2)
+  expect(report.matrix.amendment).toEqual({ 'new-task': 1, amendment: 1, 'chit-chat': 0, unchecked: 0 })
+  expect(report.matrix['chit-chat']).toEqual({ 'new-task': 0, amendment: 0, 'chit-chat': 1, unchecked: 1 })
+  expect(report.matrix['new-task']).toEqual({ 'new-task': 1, amendment: 0, 'chit-chat': 0, unchecked: 1 })
+  expect(report.precision).toEqual({ 'new-task': 0.5, amendment: 1, 'chit-chat': 1 })
+  expect(report.recall).toEqual({ 'new-task': 0.5, amendment: 0.5, 'chit-chat': 0.5 })
+  expect(report.cases.find(c => c.id === 'c5')).toMatchObject({ got: 'unchecked', reason: 'invalid reply' })
+  expect(report.cases.find(c => c.id === 'c6')).toMatchObject({ got: 'unchecked', reason: 'model api-error' })
+})
+
+test('runCharterEval scores the model kind for a null charter, with no rev-0 rule (FR-EV-3)', async () => {
+  const report = await runCharterEval(fakeCharterJudge(), DEFAULT_CONFIG, [
+    { id: 'n1', charter: null, messages: ['unrelated work'], expected: 'new-task' },
+  ])
+
+  expect(report.cases).toEqual([{ id: 'n1', expected: 'new-task', got: 'new-task', reason: '' }])
+})
+
+test('formatCharterReport holds the matrix, precision and recall, and each mismatch with the kind it got (FR-EV-3)', async () => {
+  const text = formatCharterReport(await runCharterEval(fakeCharterJudge(), DEFAULT_CONFIG, CHARTER_MIX()))
+
+  expect(text.startsWith('## Charter classification')).toBe(true)
+  expect(text).toContain('Cases: 6 · accuracy 50.0% · unchecked 2')
+  expect(text).toContain('| amendment | 1 | 1 | 0 | 0 |')
+  expect(text).toContain('| chit-chat | 0 | 0 | 1 | 1 |')
+  expect(text).toContain('| new-task | 50.0% | 50.0% |')
+  expect(text).toContain('- c2: expected amendment, got new-task')
+  expect(text).toContain('- c5: expected new-task, got unchecked (invalid reply)')
+  expect(text).toContain('- c6: expected chit-chat, got unchecked (model api-error)')
+})
+
+test('/stayontarget eval prints both reports, the drift one first (FR-EV-2, FR-EV-3)', async ($, on) => {
+  on('command.register', () => ({ value: { command: 'stayontarget' } }))
+  on('ui.log', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('fs.read', (_, e) => ({ value: e.path.endsWith('charter-cases.json') ? CHARTER_SAMPLE : SAMPLE }))
+  on('model.complete', (_, request) => ({
+    value: textOf(request.prompt[1]).startsWith('CURRENT CHARTER')
+      ? said({ kind: 'amendment', goal: 'g', inScope: [], outOfScope: [] })
+      : judged('in-scope'),
+  }))
+  on('clock.now', () => ({ value: 0 }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const text = (await $.command.run({ command: 'stayontarget', args: 'eval', ...RUN })).text ?? ''
+
+  expect(text.indexOf('# stayontarget eval')).toBe(0)
+  expect(text.indexOf('## Charter classification')).toBeGreaterThan(text.indexOf('# stayontarget eval'))
+  expect(text).toContain('Cases: 3 · accuracy')
+})
+
+test('a charter file that cannot be read leaves the drift report, and says why in its own section (FR-EV-3, fail-open)', async ($, on) => {
+  on('command.register', () => ({ value: { command: 'stayontarget' } }))
+  on('ui.log', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('fs.read', (_, e) => (e.path.endsWith('charter-cases.json') ? { deny: 'no such file' } : { value: SAMPLE }))
+  on('model.complete', () => ({ value: judged('in-scope') }))
+  on('clock.now', () => ({ value: 0 }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const text = (await $.command.run({ command: 'stayontarget', args: 'eval', ...RUN })).text ?? ''
+
+  expect(text).toContain('# stayontarget eval')
+  expect(text).toContain('Cases: 2 · accuracy 50.0%')
+  expect(text).toContain('## Charter classification\n\nNot run: ')
 })

@@ -1,7 +1,7 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import type { Allowance, Charter, DriftEvent } from '../types'
+import type { Allowance, Charter, DriftEvent, ReadAs } from '../types'
 import { EMPTY_STATS } from '../src/state'
 import { fileUrl } from '../src/pane'
 
@@ -207,6 +207,54 @@ test('the list is cut to the viewport rows, newest first (FR-UI-2)', async ($, o
   expect(await ui.find({ type: 'Button', key: 'allow-e24' })).toBeDefined()
   expect(await ui.find({ type: 'Button', key: 'allow-e23' })).toBeUndefined()
   await ui.unmount()
+})
+
+// FR-CH-10: a reading of an amendment, drawn under the goal in the events view and counted in its rows.
+const READ_AS: ReadAs = {
+  reading: 'amendment',
+  head: 'also update the tests',
+  before: { ...CHARTER, pendingText: [] },
+  consumed: ['also update the tests'],
+  afterId: 'c1',
+  afterRev: 2,
+  at: 0,
+}
+const LINE = 'Read as amendment: "also update the tests"'
+
+test('the read-as line stands under the goal, with its buttons on the writable surfaces (FR-CH-10)', async ($, on) => {
+  mock.clock(on)
+  stateBeneath(on, { ...seeded([event('e1')]), readAs: READ_AS })
+
+  const desktop = await $.ui.mount({ ...PANE, surface: 'desktop', viewport: { columns: 80, rows: 40 } })
+  expect(await desktop.find({ type: 'Text', text: LINE })).toBeDefined()
+  expect(await desktop.find({ type: 'Button', key: 'pane-ra-new' })).toBeDefined()
+  expect(await desktop.find({ type: 'Button', key: 'pane-ra-ok' })).toBeDefined()
+  await desktop.unmount()
+
+  const mobile = await $.ui.mount({ ...PANE, surface: 'mobile', viewport: { columns: 80, rows: 24 } })
+  expect(await mobile.find({ type: 'Text', text: LINE })).toBeDefined()
+  expect(await mobile.find({ type: 'Button', key: 'pane-ra-new' })).toBeUndefined()
+  await mobile.unmount()
+})
+
+test('the read-as line displaces the summary before any event, and goes before the newest event does (FR-CH-10, FR-UI-2)', async ($, on) => {
+  mock.clock(on)
+  stateBeneath(on, { ...seeded([event('e1')]), readAs: READ_AS })
+
+  // Seven body rows: the summary goes, the line and the event stay.
+  const seven = { ...PANE.props, scroll: { offset: 0, bodyRows: 7 } }
+  const roomy = await $.ui.mount({ ...PANE, props: seven, surface: 'desktop', viewport: { columns: 80, rows: 40 } })
+  expect(await roomy.find({ type: 'Text', text: /^In scope: / })).toBeUndefined()
+  expect(await roomy.find({ type: 'Text', text: LINE })).toBeDefined()
+  expect(await roomy.find({ type: 'Text', text: /drift Edit src\/e1\.ts/ })).toBeDefined()
+  await roomy.unmount()
+
+  // Six body rows: the line goes, and the event still shows.
+  const six = { ...PANE.props, scroll: { offset: 0, bodyRows: 6 } }
+  const tight = await $.ui.mount({ ...PANE, props: six, surface: 'desktop', viewport: { columns: 80, rows: 40 } })
+  expect(await tight.find({ type: 'Text', text: LINE })).toBeUndefined()
+  expect(await tight.find({ type: 'Text', text: /drift Edit src\/e1\.ts/ })).toBeDefined()
+  await tight.unmount()
 })
 
 test('no events for this charter reads as nothing judged yet (FR-UI-2)', async ($, on) => {

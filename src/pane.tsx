@@ -1,13 +1,14 @@
 import { atom, read } from 'claude-code'
 import type { Elements, RenderElement, RenderInputOf, RenderSurface } from 'claude-code'
 
-import type { Charter, DriftEvent, UiState } from '../types'
+import type { Charter, DriftEvent, ReadAs, UiState } from '../types'
 
 import type { ActionDollar, ModeDollar } from './actions'
 import { addItem, allowEvent, dismissEvent, newTask, removeItem, setMode, setView, submitGoal, toggleEvent } from './actions'
 import type { ScopeList } from './charter'
 import type { Config } from './config'
 import { cwdOf, excerptOf, oneLine } from './events'
+import { READ_AS_LABELS, readAsCorrection, readAsLine } from './marks'
 import { EMPTY_STATS, EMPTY_UI } from './state'
 import { belongsHere } from './status'
 import { stripCells, stripSummary, stripSvg, stripText } from './strip'
@@ -19,7 +20,8 @@ const charterAtom = atom({ plugin: 'stayontarget', key: 'charter' } as const, nu
 const eventsAtom = atom({ plugin: 'stayontarget', key: 'events' } as const, [] as DriftEvent[])
 const statsAtom = atom({ plugin: 'stayontarget', key: 'stats' } as const, EMPTY_STATS)
 const uiAtom = atom({ plugin: 'stayontarget', key: 'ui' } as const, EMPTY_UI as UiState)
-export const __atoms = { charterAtom, eventsAtom, statsAtom, uiAtom }
+const readAsAtom = atom({ plugin: 'stayontarget', key: 'readAs' } as const, null as ReadAs | null)
+export const __atoms = { charterAtom, eventsAtom, statsAtom, uiAtom, readAsAtom }
 
 export type PaneInput = RenderInputOf<'Pane', RenderSurface>
 // The pane writes the mode through the handler and the view through its own handler (FR-UI-10).
@@ -140,11 +142,12 @@ export async function renderPane($: PaneDollar, e: PaneInput, mode: Config['mode
   const width = e.props.bodyColumns
   // The pane's own height is its body rows; the surface's height is only the fallback when the pane names none.
   const base: number = e.props.scroll?.bodyRows ?? e.viewport?.rows ?? DEFAULT_ROWS
-  const [charter, events, stats, ui] = await Promise.all([
+  const [charter, events, stats, ui, readAs] = await Promise.all([
     read($, charterAtom),
     read($, eventsAtom),
     read($, statsAtom),
     read($, uiAtom),
+    read($, readAsAtom),
   ])
   // Each of these is drawn only on the surfaces whose table names it: Input and Select are not on mobile, Svg not on terminal.
   const elements = $.ui.resolve(e)
@@ -168,10 +171,15 @@ export async function renderPane($: PaneDollar, e: PaneInput, mode: Config['mode
   // The events view keeps the goal, the charter line, the mode and New task, and gives the events the rest. Under that, it
   // drops the strip, then the counts, then the charter summary, until an event fits; if none fits, it draws the newest
   // out-of-scope event alone (FR-UI-2).
+  // FR-CH-10: the "Read as" line stands under the goal in this view. It is the last part dropped, after the summary, and never
+  // takes a row an event needs.
+  // The clock is read only while a reading stands: a pane with none draws without it.
+  const readLine = charterView || !readAs ? null : readAsLine(readAs, await $.clock.now(), width, !writable)
   const fixed = 2 + (writable ? 2 : 0)
-  const keep = { strip: cells.length > 0, counts: true, summary: charter !== null }
-  const rowsUsed = () => fixed + (keep.strip ? 1 : 0) + (keep.counts ? 1 : 0) + (keep.summary ? 1 : 0)
-  for (const part of ['strip', 'counts', 'summary'] as const) {
+  const keep = { strip: cells.length > 0, counts: true, summary: charter !== null, readAs: readLine !== null }
+  const rowsUsed = () =>
+    fixed + (keep.strip ? 1 : 0) + (keep.counts ? 1 : 0) + (keep.summary ? 1 : 0) + (keep.readAs ? 1 : 0)
+  for (const part of ['strip', 'counts', 'summary', 'readAs'] as const) {
     if (base - rowsUsed() >= EVENT_ROWS) break
     keep[part] = false
   }
@@ -327,9 +335,20 @@ export async function renderPane($: PaneDollar, e: PaneInput, mode: Config['mode
     return <Box flexDirection="column">{eventsOut}</Box>
   }
 
+  const readRow =
+    keep.readAs && readLine !== null ? (
+      <Box>
+        <Text>{readLine.text}</Text>
+        {readLine.buttons.map(button => (
+          <Button key={`pane-${button}`} label={READ_AS_LABELS[button]} onPress={() => readAsCorrection($, button)} />
+        ))}
+      </Box>
+    ) : null
+
   return (
     <Box flexDirection="column">
       {goalRow}
+      {readRow}
       <Text dimColor>{fit(`${charterLine}${modeText} · ${tokens}`, width)}</Text>
       {keep.summary ? summary : null}
       {modeRow}

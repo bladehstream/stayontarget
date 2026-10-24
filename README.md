@@ -72,6 +72,11 @@ Each adjacent or drift change offers two actions, wherever it is shown:
 
 **Above the prompt.** While the current task has open adjacent or drift changes, a band shows the goal, the counts, and **Review** (opens the pane) and **New task**. It disappears when nothing is open and gives up parts on narrow screens.
 
+**Read as.** After a prompt changes the charter, the band and the pane show how it was read, for example
+`Read as amendment: "also update the tests"`, with **New task** or **Same task**, **Not a change** and **OK**. Nothing
+waits for it; one click corrects the charter (restoring the earlier one, with its allowances, where that applies). It
+goes away at the next prompt or after 10 minutes.
+
 **The pane** has two views. The events view shows the goal, a summary of the scope lists, the mode, counts, tokens used, a strip with one coloured block per recent verdict, and the events, newest first. Clicking an event shows the judged excerpt and a link to the file (on the desktop app the file path is shown as text, since it opens only `https:` links). **Edit charter** switches to the charter view, where you can edit the goal and add or remove in-scope and out-of-scope items; the model never overwrites a list you edited. The mode can be switched between warn and strict from the pane; if Claude Code refuses the change, a toast says so and the pane shows the mode still in force.
 
 The pane works on terminal, desktop and VS Code. On mobile everything is read-only.
@@ -97,21 +102,32 @@ Each judged change costs one model call, and each charter revision costs at most
 
 ## Accuracy
 
-Live eval on 2026-10-23, Claude Code 2.1.309 on Windows 11, model `haiku`: 32 labelled cases, 93.8% accuracy, 0 unchecked. The run took 19 seconds and used 19,272 input and 2,460 output tokens.
+Live eval on 2026-10-24, Claude Code 2.1.309 on Windows 11, model `haiku`, through `/stayontarget eval`.
+
+**Judge** (32 labelled changes): 96.9% accuracy, 0 unchecked, 18 seconds, 19,272 input and 2,524 output tokens.
 
 | Class | Cases | Precision | Recall |
 |---|---|---|---|
 | Drift | 15 | 100% | 100% |
-| In-scope | 13 | 92.3% | 92.3% |
-| Adjacent | 4 | 75% | 75% |
+| In-scope | 13 | 100% | 92.3% |
+| Adjacent | 4 | 80% | 100% |
 
-Two of the 32 were wrong. A regression test labelled adjacent was judged in-scope, and an import update labelled in-scope was judged adjacent. The adjacent class has only 4 cases, so its numbers say little yet. Add more cases before you trust its precision.
+The one miss: an import update labelled in-scope was judged adjacent. The adjacent class has only 4 cases, so its
+numbers say little yet.
+
+**Charter classification** (32 labelled prompts): 96.9% accuracy, 0 unchecked, 18 seconds, 15,060 input and 3,283
+output tokens. New task: precision 100%, recall 90.9% (11 cases); amendment: 92.9% / 100% (13); chit-chat: 100% /
+100% (8). The one miss: a new task on the same file as the current one was read as an amendment, which is the case
+the "Read as" line's **New task** button corrects.
 
 ## Limitations
 
 - A subagent working in another directory has its paths normalised against the session's directory, so its targets may not match allowances made for relative paths.
 - A store write that hangs for more than 30 seconds is abandoned, and if it lands later it can overwrite a newer snapshot of the same session.
-- These interactive checks are not yet confirmed: strict mode under `bypassPermissions`, a prompt typed into a running turn, the footer, pane, tool-row badges and band in the desktop app, whether the drift note changes the model's behaviour, and restore after resume.
+- Rows are fitted by character count, not display width, so Chinese, Japanese or other full-width text in a goal or reason can make a row wrap.
+- On Windows, a pane file link for a network-share path (`\\server\share\…`) may not open; the path is still shown.
+- Eval numbers come from single runs: the same cases can differ by about one case between runs.
+- These interactive checks are not yet confirmed: strict mode under `bypassPermissions`, a prompt typed into a running turn, the footer, pane, tool-row badges and band in the desktop app, whether the drift note changes the model's behaviour, and restore after resume, and the "Read as" line.
 
 ## Licence
 

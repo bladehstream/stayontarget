@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
-import type { Allowance, Charter, DriftEvent, Stats } from '../types'
+import type { Allowance, Charter, DriftEvent, ReadAs, Stats } from '../types'
 
 import { refreshStatus } from './actions'
 import { messageOf } from './model'
@@ -13,7 +13,8 @@ const charterAtom = atom({ plugin: 'stayontarget', key: 'charter' } as const, nu
 const eventsAtom = atom({ plugin: 'stayontarget', key: 'events' } as const, [] as DriftEvent[])
 const allowancesAtom = atom({ plugin: 'stayontarget', key: 'allowances' } as const, [] as Allowance[])
 const statsAtom = atom({ plugin: 'stayontarget', key: 'stats' } as const, EMPTY_STATS)
-export const __atoms = { charterAtom, eventsAtom, allowancesAtom, statsAtom }
+const readAsAtom = atom({ plugin: 'stayontarget', key: 'readAs' } as const, null as ReadAs | null)
+export const __atoms = { charterAtom, eventsAtom, allowancesAtom, statsAtom, readAsAtom }
 
 export type Snapshot = {
   v: 1
@@ -76,7 +77,9 @@ function isCharter(x: unknown): boolean {
     Array.isArray(x.editedFields) &&
     x.editedFields.every(field => EDITABLE.includes(field)) &&
     isTextList(x.pendingText) &&
-    isNumber(x.createdAt)
+    isNumber(x.createdAt) &&
+    // FR-CH-10: a forced reading is in a snapshot only as the one reading it can carry.
+    (x.forcedReading === undefined || x.forcedReading === 'amendment')
   )
 }
 
@@ -514,6 +517,8 @@ export async function resetSessionState($: Pick<PersistDollar, 'state'>): Promis
   await update($, eventsAtom, () => [])
   await update($, allowancesAtom, () => [])
   await update($, statsAtom, () => EMPTY_STATS)
+  // FR-CH-10: the "Read as" line is view state, reset with the rest.
+  await update($, readAsAtom, () => null)
 }
 
 // The deadline for a session.end save: the hook's remaining budget less a margin, or a fixed second when no budget is read.

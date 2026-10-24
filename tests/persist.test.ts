@@ -6,7 +6,7 @@ import type { Allowance, Charter, DriftEvent, Stats } from '../types'
 import { __atoms as persistAtoms, fitSnapshot, isSnapshot, MAX_SESSIONS, resetSessionState, restore, saveNow, schedulePersist, sessionEndDeadline, SNAPSHOT_MAX_BYTES } from '../src/persist'
 import type { PersistDollar, Snapshot } from '../src/persist'
 import * as shared from '../src/state'
-import { EMPTY_STATS, EVENTS_CAP, charterAtom, eventsAtom, statsAtom } from '../src/state'
+import { EMPTY_STATS, EVENTS_CAP, charterAtom, eventsAtom, readAsAtom, statsAtom } from '../src/state'
 
 // ---- fixtures ----------------------------------------------------------------------------------------------------------
 
@@ -657,6 +657,33 @@ test('resetSessionState puts the four atoms back to their initial values (FR-ST-
 })
 
 // ---- through the plugin's hooks, on the kit ----------------------------------------------------------------------------
+
+test('isSnapshot takes a charter with no forced reading, or with an amendment forced, and no other (FR-CH-10)', () => {
+  expect(isSnapshot(snapshot('s1', { charter: CHARTER }))).toBe(true)
+  expect(isSnapshot(snapshot('s1', { charter: { ...CHARTER, forcedReading: 'amendment' } }))).toBe(true)
+  expect(isSnapshot(snapshot('s1', { charter: { ...CHARTER, forcedReading: 'new-task' } as unknown as Charter }))).toBe(false)
+})
+
+test('the "Read as" line is never in a snapshot, and a forced reading is kept with its charter (FR-ST-3, FR-CH-10)', async () => {
+  const w = world()
+  w.seed(charterAtom.ref, { ...CHARTER, forcedReading: 'amendment' })
+  w.seed(readAsAtom.ref, { reading: 'new-task', head: 'x', before: CHARTER, consumed: ['x'], afterId: 'c1', afterRev: 2, at: 1 })
+
+  expect(await saveNow(w.$, 's1')).toBe(true)
+
+  const stored = w.stored('session:s1') as Record<string, unknown>
+  expect(stored).not.toHaveProperty('readAs')
+  expect(stored.charter).toMatchObject({ forcedReading: 'amendment' })
+})
+
+test('a /clear reset leaves no "Read as" line behind (FR-ST-4, FR-CH-10)', async () => {
+  const w = world()
+  w.seed(readAsAtom.ref, { reading: 'new-task', head: 'x', before: CHARTER, consumed: ['x'], afterId: 'c1', afterRev: 2, at: 1 })
+
+  await resetSessionState(w.$)
+
+  expect(w.value(readAsAtom.ref)).toBeNull()
+})
 
 // The store beneath the plugin, as a test sees it: what is stored under each key, and the writes it was asked for. A
 // refused write is a throw from `store.set` (FR-ST-3).

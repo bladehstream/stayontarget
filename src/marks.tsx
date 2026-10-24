@@ -1,21 +1,22 @@
 import { atom, read } from 'claude-code'
 import type { RenderElement, RenderInputOf, RenderSurface } from 'claude-code'
 
-import type { Charter, DriftEvent } from '../types'
+import type { Charter, DriftEvent, ReadAs } from '../types'
 
 import type { ActionDollar } from './actions'
-import { allowEvent, dismissEvent, newTask } from './actions'
+import { acceptReading, allowEvent, correctAsNewTask, correctAsNoChange, correctAsSameTask, dismissEvent, newTask } from './actions'
 import type { Footer } from './events'
 import { oneLine } from './events'
 import { printable } from './text'
-import { EVENTS_CAP } from './state'
+import { EVENTS_CAP, READ_AS_MAX_AGE_MS } from './state'
 import { belongsHere } from './status'
 
 // The engine's scan needs each atom in the file that reads or writes it, so the atoms are declared here. Ref and initial
 // value match src/state.ts; the wiring test checks that they do for the modules it lists.
 const charterAtom = atom({ plugin: 'stayontarget', key: 'charter' } as const, null as Charter | null)
 const eventsAtom = atom({ plugin: 'stayontarget', key: 'events' } as const, [] as DriftEvent[])
-export const __atoms = { charterAtom, eventsAtom }
+const readAsAtom = atom({ plugin: 'stayontarget', key: 'readAs' } as const, null as ReadAs | null)
+export const __atoms = { charterAtom, eventsAtom, readAsAtom }
 
 // The footers drawn this session, by their text: the rows each one prints, as built (FR-UI-8). Bounded to the last
 // FOOTERS_KEPT. A footer the map does not hold, such as one from before a hot reload, draws as the engine drew it.
@@ -54,10 +55,21 @@ const GOAL_SEPARATOR = ' · '
 const PREFIX = 'stayontarget: '
 // The band's buttons, by the step that drops them.
 type BandButton = 'review' | 'new'
-// The fewest cells a badge's reason keeps; below it the badge's buttons move to a line of their own.
+// The fewest cells a badge's reason keeps; below it the badge's buttons move to a line of their own. The same floor keeps
+// the "Read as" line's text beside its buttons (FR-CH-10).
 const REASON_MIN = 20
 // The separator the badge draws before its reason: " — ".
 const REASON_SEPARATOR = 3
+
+// FR-CH-10: the buttons of the "Read as" line, by the key each one raises, and their labels.
+export type ReadAsButton = 'ra-new' | 'ra-same' | 'ra-none' | 'ra-ok'
+export const READ_AS_LABELS: Record<ReadAsButton, string> = {
+  'ra-new': 'New task',
+  'ra-same': 'Same task',
+  'ra-none': 'Not a change',
+  'ra-ok': 'OK',
+}
+export type ReadAsLine = { text: string; buttons: ReadAsButton[] }
 
 const isOutOfScope = (event: DriftEvent): boolean => event.verdict === 'adjacent' || event.verdict === 'drift'
 
@@ -65,6 +77,29 @@ const isOutOfScope = (event: DriftEvent): boolean => event.verdict === 'adjacent
 function fit(text: string, width: number): string {
   if (width < 1) return ''
   return text.length > width ? `${text.slice(0, width - 1)}…` : text
+}
+
+// FR-CH-10: the "Read as" line for the time `now`, fitted to `width` cells. Null (hidden) without a reading, or once the
+// reading is older than READ_AS_MAX_AGE_MS. Its buttons are the reading's: an amendment offers New task and Not a change;
+// a new task offers Same task and Not a change; OK is always there. The buttons share the line while its text keeps
+// REASON_MIN cells; narrower, the text takes the whole width and the buttons go. Mobile has the text only. Reads only.
+export function readAsLine(readAs: ReadAs | null, now: number, width: number, mobile = false): ReadAsLine | null {
+  if (readAs === null || now - readAs.at > READ_AS_MAX_AGE_MS) return null
+  const buttons: ReadAsButton[] =
+    readAs.reading === 'amendment' ? ['ra-new', 'ra-none', 'ra-ok'] : ['ra-same', 'ra-none', 'ra-ok']
+  const room = buttonRoom(buttons.map(button => READ_AS_LABELS[button]))
+  const beside = !mobile && width - room >= REASON_MIN
+  const reading = readAs.reading === 'new-task' ? 'new task' : 'amendment'
+  const text = fit(`Read as ${reading}: "${oneLine(printable(readAs.head))}"`, beside ? width - room : width)
+  return { text, buttons: !mobile && beside ? buttons : [] }
+}
+
+// FR-CH-10: the correction a "Read as" button raises.
+export function readAsCorrection($: ActionDollar, button: ReadAsButton): Promise<void> {
+  if (button === 'ra-new') return correctAsNewTask($)
+  if (button === 'ra-same') return correctAsSameTask($)
+  if (button === 'ra-none') return correctAsNoChange($)
+  return acceptReading($)
 }
 
 // FR-UI-6: the verdict of a tool call, drawn in one row beneath the engine's row. Reads only; the buttons are handlers.
@@ -112,23 +147,58 @@ export async function renderToolBadge($: ActionDollar, e: ToolUseInput, next: Ne
   )
 }
 
-// FR-UI-7: the band above the prompt, one row: the goal's head and the counts of the charter's open out-of-scope events.
-// Hidden while a survey holds the band, on an agent's transcript, and with nothing open to show.
+// FR-UI-7 and FR-CH-10: the band above the prompt. Its rows: the "Read as" line first, while its reading stands; then the
+// counts row, for the charter's open out-of-scope events (with a line standing, it needs maxRows of at least 2). Hidden while
+// a survey holds the band, on an agent's transcript, and with nothing to show.
 export async function renderBand($: ActionDollar, e: BandInput, next: Next<BandInput>): Promise<RenderElement> {
   if (e.props.hasSurvey || e.props.view.agentId !== undefined) return next(e)
-  const [charter, events] = await Promise.all([read($, charterAtom), read($, eventsAtom)])
-  if (charter === null) return next(e)
+  const [charter, events, readAs] = await Promise.all([read($, charterAtom), read($, eventsAtom), read($, readAsAtom)])
+
+  const width = e.props.bodyColumns
+  const isMobile = e.surface === 'mobile'
+  // The clock is read only while a reading stands: a band with none draws without it.
+  const line = readAs ? readAsLine(readAs, await $.clock.now(), width, isMobile) : null
 
   let drift = 0
   let adjacent = 0
-  for (const event of events) {
-    if (event.status !== 'open' || !belongsHere(charter, event)) continue
-    if (event.verdict === 'drift') drift += 1
-    if (event.verdict === 'adjacent') adjacent += 1
+  if (charter !== null) {
+    for (const event of events) {
+      if (event.status !== 'open' || !belongsHere(charter, event)) continue
+      if (event.verdict === 'drift') drift += 1
+      if (event.verdict === 'adjacent') adjacent += 1
+    }
   }
-  if (drift + adjacent === 0) return next(e)
+  const counted = drift + adjacent > 0
+  if (line === null && !counted) return next(e)
 
   const { Box, Button, Text } = $.ui.resolve(e)
+  const rows: RenderElement[] = []
+  if (line !== null) {
+    rows.push(
+      <Box key="band-read-as">
+        <Text>{line.text}</Text>
+        {line.buttons.map(button => (
+          <Button key={`band-${button}`} label={READ_AS_LABELS[button]} onPress={() => readAsCorrection($, button)} />
+        ))}
+      </Box>,
+    )
+  }
+  if (counted && (line === null || e.props.maxRows >= 2)) rows.push(countsRow($, { Box, Button, Text }, e, charter?.goal ?? '', drift, adjacent))
+  if (rows.length === 0) return next(e)
+  return rows.length === 1 && rows[0] !== undefined ? rows[0] : <Box flexDirection="column">{rows}</Box>
+}
+
+// The band's counts row (FR-UI-7): what the band gives up, in order, as the row is too wide for the body. Its goal head is
+// `goal`, as the charter holds it.
+function countsRow(
+  $: ActionDollar,
+  elements: Pick<ReturnType<ActionDollar['ui']['resolve']>, 'Box' | 'Button' | 'Text'>,
+  e: BandInput,
+  goal: string,
+  drift: number,
+  adjacent: number,
+): RenderElement {
+  const { Box, Button, Text } = elements
   const width = e.props.bodyColumns
   const isMobile = e.surface === 'mobile'
   const full = `${drift} drift · ${adjacent} adjacent`
@@ -146,18 +216,18 @@ export async function renderBand($: ActionDollar, e: BandInput, next: Next<BandI
     const labels = (isMobile ? [] : step.buttons).map(button => (button === 'review' ? REVIEW_LABEL : NEW_TASK_LABEL))
     return (step.prefix ? PREFIX.length : 0) + step.counts.length + buttonRoom(labels)
   }
-  const step = steps.find(one => widthOf(one) <= width) ?? steps[steps.length - 1]
-  if (step === undefined) return next(e)
+  // The last step is the one a body narrower than every step draws.
+  const step = steps.find(one => widthOf(one) <= width) ?? { prefix: false, counts: short, buttons: [] }
   const buttons = isMobile ? [] : step.buttons
   // The goal head takes what the step leaves over, at most GOAL_HEAD cells.
   const room = Math.min(GOAL_HEAD, width - widthOf(step) - GOAL_SEPARATOR.length)
-  const goal = room > 0 ? `${fit(oneLine(printable(charter.goal ?? '')), room) || '(no goal)'}${GOAL_SEPARATOR}` : ''
-  const line = `${step.prefix ? PREFIX : ''}${goal}${step.counts}`
-  if (isMobile) return <Text>{line}</Text>
+  const head = room > 0 ? `${fit(oneLine(printable(goal)), room) || '(no goal)'}${GOAL_SEPARATOR}` : ''
+  const text = `${step.prefix ? PREFIX : ''}${head}${step.counts}`
+  if (isMobile) return <Text>{text}</Text>
 
   return (
     <Box>
-      <Text>{line}</Text>
+      <Text>{text}</Text>
       {buttons.includes('review') ? (
         <Button
           key="band-review"
