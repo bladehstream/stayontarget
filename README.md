@@ -55,19 +55,26 @@ Defaults come from `plugin.json`:
 - `mode`: `warn` (default) or `strict`. Strict mode is for attended sessions. In a headless `claude -p` run nobody can answer the ask, so it becomes a denial.
 - `model`: the model used for charter updates and judgements. Default `haiku`.
 - `toasts`: show a toast on drift, at most one per 30 seconds. Default off.
+- `notify`: send a desktop notification on drift, at most one per minute. Default off.
 
 Invalid values fall back to the defaults.
 
-## Pane, command and status line
+## What you see
 
 `/stayontarget` opens the pane. `/stayontarget new` starts a new task, which clears the charter; the next main turn creates one. `/stayontarget eval` runs the judge over the labelled cases (see Accuracy).
 
-The pane shows the goal, the charter id and revision, whether the charter was distilled, the mode, verdict counts and the model tokens used this session. Events are listed newest first. Each adjacent or drift event has two buttons:
+Each adjacent or drift change offers two actions, wherever it is shown:
 
 - **Allow for this task** makes further changes of the same kind to the same target in-scope for this charter.
 - **Dismiss** closes the event.
 
-The goal can be edited where the surface has an input. The pane works on terminal, desktop and VS Code. On mobile it is read-only.
+**In the transcript.** Each judged tool call gets a one-line badge under its row with the verdict and the reason; an open adjacent or drift change carries the two actions there. Hovering a badge lights the matching pane row. The turn footer lists that turn's out-of-scope changes, each with its own actions.
+
+**Above the prompt.** While the current task has open adjacent or drift changes, a band shows the goal, the counts, and **Review** (opens the pane) and **New task**. It disappears when nothing is open and gives up parts on narrow screens.
+
+**The pane** has two views. The events view shows the goal, a summary of the scope lists, the mode, counts, tokens used, a strip with one coloured block per recent verdict, and the events, newest first. Clicking an event shows the judged excerpt and a link to the file (on the desktop app the file path is shown as text, since it opens only `https:` links). **Edit charter** switches to the charter view, where you can edit the goal and add or remove in-scope and out-of-scope items; the model never overwrites a list you edited. The mode can be switched between warn and strict from the pane; if Claude Code refuses the change, a toast says so and the pane shows the mode still in force.
+
+The pane works on terminal, desktop and VS Code. On mobile everything is read-only.
 
 The status line shows one of four texts:
 
@@ -104,7 +111,7 @@ Two of the 32 were wrong. A regression test labelled adjacent was judged in-scop
 
 - A subagent working in another directory has its paths normalised against the session's directory, so its targets may not match allowances made for relative paths.
 - A store write that hangs for more than 30 seconds is abandoned, and if it lands later it can overwrite a newer snapshot of the same session.
-- These interactive checks are not yet confirmed: strict mode under `bypassPermissions`, a prompt typed into a running turn, the footer and pane in the desktop app, whether the drift note changes the model's behaviour, and restore after resume.
+- These interactive checks are not yet confirmed: strict mode under `bypassPermissions`, a prompt typed into a running turn, the footer, pane, tool-row badges and band in the desktop app, whether the drift note changes the model's behaviour, and restore after resume.
 
 ## Licence
 

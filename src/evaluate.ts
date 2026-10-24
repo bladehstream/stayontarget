@@ -161,6 +161,8 @@ function recentOf(c: EvalCase): DriftEvent[] {
       target: clean(parts.target, ITEM_CASE_MAX),
       verdict: parts.verdict,
       reason: '',
+      excerpt: '',
+      cwd: null,
       source: 'judge',
       action: 'none',
       status: 'open',

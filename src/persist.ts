@@ -53,6 +53,7 @@ const VERDICTS: readonly unknown[] = ['in-scope', 'adjacent', 'drift', 'unchecke
 const SOURCES: readonly unknown[] = ['judge', 'cache', 'allowance', 'none']
 const ACTIONS: readonly unknown[] = ['none', 'note', 'ask', 'unchecked']
 const STATUSES: readonly unknown[] = ['open', 'allowed', 'dismissed']
+const EDITABLE: readonly unknown[] = ['goal', 'inScope', 'outOfScope']
 
 const isRecord = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x)
 const isNumber = (x: unknown): x is number => typeof x === 'number' && Number.isFinite(x)
@@ -73,7 +74,7 @@ function isCharter(x: unknown): boolean {
     isTextList(x.outOfScope) &&
     isFlag(x.distilled) &&
     Array.isArray(x.editedFields) &&
-    x.editedFields.every(field => field === 'goal') &&
+    x.editedFields.every(field => EDITABLE.includes(field)) &&
     isTextList(x.pendingText) &&
     isNumber(x.createdAt)
   )
@@ -92,6 +93,10 @@ function isEvent(x: unknown): boolean {
     isText(x.target) &&
     isOneOf(VERDICTS, x.verdict) &&
     isText(x.reason) &&
+    // A 0.1.0 snapshot has no excerpt; it is restored with an empty one (restore).
+    (x.excerpt === undefined || isText(x.excerpt)) &&
+    // A snapshot from before the call directory was kept has no cwd; it is restored with null (restore).
+    (x.cwd === undefined || isNullOr(isText, x.cwd)) &&
     isOneOf(SOURCES, x.source) &&
     isOneOf(ACTIONS, x.action) &&
     isOneOf(STATUSES, x.status) &&
@@ -490,7 +495,9 @@ export async function restore($: PersistDollar, sessionId: string): Promise<bool
     if (!isSnapshot(stored) || stored.sessionId !== sessionId) return false
     const snapshot = stored
     await update($, charterAtom, () => snapshot.charter)
-    await update($, eventsAtom, () => snapshot.events)
+    await update($, eventsAtom, () =>
+      snapshot.events.map(event => ({ ...event, excerpt: event.excerpt ?? '', cwd: event.cwd ?? null })),
+    )
     await update($, allowancesAtom, () => snapshot.allowances)
     // The flag describes the store this session writes to, not the snapshot, so the restored session starts with it clear.
     await update($, statsAtom, () => ({ ...snapshot.stats, persistFailed: false }))

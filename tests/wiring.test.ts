@@ -6,6 +6,8 @@ import { __atoms as charterAtoms } from '../src/charter'
 import { __atoms as judgeAtoms } from '../src/judge'
 import { __atoms as eventAtoms } from '../src/events'
 import { __atoms as statusAtoms } from '../src/status'
+import { __atoms as actionAtoms } from '../src/actions'
+import { __atoms as paneAtoms } from '../src/pane'
 import * as shared from '../src/state'
 
 // The hooks of the plugin under test, driven through the kit. The engine answers beneath them; the test's bottom hooks
@@ -84,7 +86,7 @@ function beneath(on: On): string[] {
 // Each module declares its own atoms (the engine's scan needs them in the calling file); each must name the same ref and
 // initial value as src/state.ts, or the module would read and write a different slot.
 test('the atoms each module declares match src/state.ts in ref and initial value', () => {
-  const local = [charterAtoms, judgeAtoms, eventAtoms, statusAtoms]
+  const local = [charterAtoms, judgeAtoms, eventAtoms, statusAtoms, actionAtoms, paneAtoms]
   for (const atoms of local) {
     for (const [name, atom] of Object.entries(atoms)) {
       const want = shared[name as keyof typeof shared] as { ref: unknown; initial: unknown }
@@ -147,6 +149,22 @@ test('a call with no verdict entry returns its result at once (FR-VD-7)', async 
   const result = await $.tool.call({ tool: 'Edit', ...NOTES })
 
   expect(result.context).toBeUndefined()
+})
+
+test('a notification held forever beneath does not hold the verdict or its note (FR-UI-9, FR-VD-8)', { options: { notify: true } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const { held } = model(on)
+  beneath(on)
+  on('ui.notify', () => new Promise(() => {}))
+  on('tool.check', () => ({ decision: 'allow' }))
+  on('tool.call', () => ({ result: 'edited' }))
+  await start($)
+
+  const call = $.tool.call({ tool: 'Edit', ...NOTES })
+  await answer(clock, held, judged('drift'))
+  const result = await call
+
+  expect(result.context).toEqual([NOTE])
 })
 
 test('warn: a drift on a finished call gets a model note and shows in the status line (FR-RS-1)', async ($, on) => {
@@ -280,7 +298,7 @@ test('a subagent call is judged against the active main turn, and its drift show
   await call
   const done = await $.turn.complete({ turnId: 'turn-1', answer: 'Done.', durationMs: 1, isAborted: false, reason: 'answer' })
 
-  expect(done.text).toBe('stayontarget: out-of-scope actions this turn\n• drift: Edit docs/notes.md (touches an unrelated file)')
+  expect(done.text).toBe('stayontarget: out-of-scope actions this turn (turn-1)\n• drift: Edit docs/notes.md (touches an unrelated file)')
 })
 
 test('a slash command and the skill body it fires reach the charter as pending text (FR-CH-3)', async ($, on) => {
@@ -381,7 +399,7 @@ test('a turn footer lists its out-of-scope events and never repeats the answer (
     reason: 'answer',
   })
 
-  expect(done.text).toBe('stayontarget: out-of-scope actions this turn\n• drift: Edit docs/notes.md (touches an unrelated file)')
+  expect(done.text).toBe('stayontarget: out-of-scope actions this turn (turn-1)\n• drift: Edit docs/notes.md (touches an unrelated file)')
 })
 
 test('a note quotes the charter its verdict was judged against, not a newer one (FR-VD-3)', async ($, on) => {

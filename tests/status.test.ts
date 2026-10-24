@@ -29,6 +29,8 @@ function event(verdict: DriftEvent['verdict'], overrides: Partial<DriftEvent> = 
     target: 'src/a.ts',
     verdict,
     reason: 'r',
+    excerpt: '',
+    cwd: null,
     source: 'judge',
     action: 'note',
     status: 'open',

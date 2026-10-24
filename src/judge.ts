@@ -8,6 +8,7 @@ import { REDACT_WINDOW_MARGIN, fingerprint } from './action'
 import type { CharterDollar } from './charter'
 import { ensureCharter } from './charter'
 import type { Config } from './config'
+import { oneLine } from './events'
 import { callModel, messageOf, parseJsonObject } from './model'
 import { JUDGE_INSTRUCTIONS } from './prompts'
 import { redactText } from './redact'
@@ -249,7 +250,8 @@ function parseVerdict(text: string): Judged | null {
   const reason = fields.reason
   if (typeof verdict !== 'string' || !VERDICTS.includes(verdict)) return null
   if (typeof reason !== 'string' || reason.trim() === '') return null
-  return { verdict: verdict as JudgedVerdict, reason: boundedReason(reason.trim()) }
+  // One line before it is bounded and cached, so every consumer draws one line (FR-UI-6).
+  return { verdict: verdict as JudgedVerdict, reason: boundedReason(oneLine(reason)) }
 }
 
 // The model's reason is shown and stored, so it is redacted before it is kept, then bounded to REASON_MAX.

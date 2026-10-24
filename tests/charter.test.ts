@@ -5,11 +5,13 @@ import type { Charter, Stats } from '../types'
 import { DEFAULT_CONFIG } from '../src/config'
 import type { CharterDollar } from '../src/charter'
 import {
+  addScopeItem,
   editGoal,
   ensureCharter,
   onCommandSubmitted,
   onMainTurnStart,
   onSkillPrompt,
+  removeScopeItem,
   startNewTask,
 } from '../src/charter'
 import { getModelStats } from '../src/model'
@@ -800,4 +802,95 @@ test('a caller joining a slow flight with a 2 s budget returns by 2 s with the c
   await w.answer(said(newTask('Build it')))
   expect(await a).toMatchObject({ rev: 1, pendingText: [] })
   expect(getModelStats().inFlight).toBe(0)
+})
+
+test('the person adds a scope item: trimmed, redacted, cut to 200, marked edited and raising rev (FR-UI-10, FR-CH-8)', async () => {
+  const w = world()
+  await onMainTurnStart(w.$, 'build the parser', 1)
+  await distil(w, said(newTask('Build parser', ['src/a.ts'])))
+
+  await addScopeItem(w.$, 'inScope', '  src/b.ts  ')
+  expect(w.charter()).toMatchObject({ rev: 2, inScope: ['src/a.ts', 'src/b.ts'], editedFields: ['inScope'] })
+
+  await addScopeItem(w.$, 'outOfScope', 'password=hunter2 ' + 'x'.repeat(300))
+  const out = w.charter()?.outOfScope[0] ?? ''
+  expect(out).not.toContain('hunter2')
+  expect(out.length).toBeLessThanOrEqual(200)
+  expect(w.charter()).toMatchObject({ rev: 3, editedFields: ['inScope', 'outOfScope'] })
+
+  await addScopeItem(w.$, 'inScope', 'src/c.ts')
+  expect(w.charter()?.editedFields).toEqual(['inScope', 'outOfScope'])
+})
+
+test('an empty or duplicate scope item changes nothing (FR-UI-10)', async () => {
+  const w = world()
+  await onMainTurnStart(w.$, 'build the parser', 1)
+  await distil(w, said(newTask('Build parser', ['src/a.ts'])))
+
+  await addScopeItem(w.$, 'inScope', '   ')
+  await addScopeItem(w.$, 'inScope', 'src/a.ts')
+  expect(w.charter()).toMatchObject({ rev: 1, inScope: ['src/a.ts'], editedFields: [] })
+})
+
+test('a ninth scope item is refused and logged (FR-UI-10)', async () => {
+  const w = world()
+  await onMainTurnStart(w.$, 'build the parser', 1)
+  await distil(w, said(newTask('Build parser', Array.from({ length: 8 }, (_, i) => `f${i}.ts`))))
+
+  await addScopeItem(w.$, 'inScope', 'ninth.ts')
+  expect(w.charter()).toMatchObject({ rev: 1, editedFields: [] })
+  expect(w.charter()?.inScope).toHaveLength(8)
+  expect(w.logs.some(line => line.includes('at most 8'))).toBe(true)
+})
+
+test('a scope item is removed by index; an index out of range changes nothing (FR-UI-10)', async () => {
+  const w = world()
+  await onMainTurnStart(w.$, 'build the parser', 1)
+  await distil(w, said(newTask('Build parser', ['src/a.ts', 'src/b.ts'])))
+
+  await removeScopeItem(w.$, 'inScope', 5)
+  await removeScopeItem(w.$, 'inScope', -1)
+  expect(w.charter()).toMatchObject({ rev: 1, inScope: ['src/a.ts', 'src/b.ts'], editedFields: [] })
+
+  await removeScopeItem(w.$, 'inScope', 0)
+  expect(w.charter()).toMatchObject({ rev: 2, inScope: ['src/b.ts'], editedFields: ['inScope'] })
+})
+
+test('editing scope with no charter changes nothing (FR-UI-10)', async () => {
+  const w = world()
+  await addScopeItem(w.$, 'inScope', 'src/a.ts')
+  await removeScopeItem(w.$, 'outOfScope', 0)
+  expect(w.charter()).toBe(null)
+})
+
+test('an amendment keeps an edited list and replaces an unedited one (FR-CH-5)', async () => {
+  const w = world()
+  await onMainTurnStart(w.$, 'build the parser', 1)
+  await distil(w, said(newTask('Build parser', ['src/a.ts'], ['docs/x.md'])))
+  await addScopeItem(w.$, 'inScope', 'src/mine.ts')
+
+  await onMainTurnStart(w.$, 'also the lexer', 2)
+  await distil(w, said(amendment('Build parser', ['src/model.ts'], ['tests/y.ts'])))
+  expect(w.charter()).toMatchObject({ inScope: ['src/a.ts', 'src/mine.ts'], outOfScope: ['tests/y.ts'], editedFields: ['inScope'] })
+})
+
+test('the first resolution keeps a list the person edited before it (FR-CH-4)', async () => {
+  const w = world()
+  await onMainTurnStart(w.$, 'build the parser', 1)
+  await addScopeItem(w.$, 'outOfScope', 'docs/')
+  await distil(w, said(newTask('Build parser', ['src/a.ts'], ['tests/y.ts'])))
+  expect(w.charter()).toMatchObject({ outOfScope: ['docs/'], inScope: ['src/a.ts'], distilled: true })
+})
+
+test('a goal edit after a list edit keeps the list edited, so an amendment keeps both (FR-CH-5, FR-CH-8)', async () => {
+  const w = world()
+  await onMainTurnStart(w.$, 'build the parser', 1)
+  await distil(w, said(newTask('Build parser', ['src/a.ts'])))
+  await addScopeItem(w.$, 'inScope', 'src/mine.ts')
+  await editGoal(w.$, 'Only the lexer')
+  expect(w.charter()?.editedFields).toEqual(['inScope', 'goal'])
+
+  await onMainTurnStart(w.$, 'also the docs', 2)
+  await distil(w, said(amendment('Model goal', ['src/model.ts'])))
+  expect(w.charter()).toMatchObject({ goal: 'Only the lexer', inScope: ['src/a.ts', 'src/mine.ts'], editedFields: ['inScope', 'goal'] })
 })

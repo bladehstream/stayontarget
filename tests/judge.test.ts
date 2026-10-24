@@ -56,6 +56,8 @@ function event(id: string, charterId: string, target: string): DriftEvent {
     target,
     verdict: 'drift',
     reason: 'r',
+    excerpt: '',
+    cwd: null,
     source: 'judge',
     action: 'note',
     status: 'open',
@@ -118,6 +120,17 @@ test('a judged action carries the charter and its rev, and counts its tokens (FR
   expect(w.requests[0]?.maxTokens).toBe(200)
   expect(w.requests[0]?.model).toBe('haiku')
   expect(textOf(w.requests[0]?.prompt[0])).toBe(JUDGE_INSTRUCTIONS)
+})
+
+test('a reason with newlines is one line in the decision (FR-UI-6)', async () => {
+  const w = world()
+  clearVerdictCache()
+  seeded(w)
+
+  const pending = decide(w.$, cfg, edit('x'), 0)
+  await w.answer(judged('drift', 'first\nsecond   line'))
+
+  expect((await pending).reason).toBe('first second line')
 })
 
 test('an allowance for the same charter, tool and target is in-scope and beats the cache (FR-VD-3)', async () => {

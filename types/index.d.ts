@@ -8,7 +8,7 @@ export type Charter = {
   inScope: string[]
   outOfScope: string[]
   distilled: boolean
-  editedFields: ('goal')[]
+  editedFields: ('goal' | 'inScope' | 'outOfScope')[]
   pendingText: string[]
   createdAt: number
 }
@@ -24,6 +24,8 @@ export type DriftEvent = {
   target: string
   verdict: Verdict
   reason: string
+  excerpt: string
+  cwd: string | null
   source: 'judge' | 'cache' | 'allowance' | 'none'
   action: 'none' | 'note' | 'ask' | 'unchecked'
   status: 'open' | 'allowed' | 'dismissed'
@@ -49,6 +51,8 @@ export type Stats = {
   persistFailed: boolean
 }
 
+export type UiState = { expandedEventId: string | null; view: 'events' | 'charter' }
+
 declare module 'claude-code' {
   interface PluginState {
     stayontarget: {
@@ -56,6 +60,7 @@ declare module 'claude-code' {
       events: DriftEvent[]
       allowances: Allowance[]
       stats: Stats
+      ui: UiState
     }
   }
 }

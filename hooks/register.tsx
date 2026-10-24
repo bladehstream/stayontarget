@@ -13,8 +13,11 @@ import { footerFor, newEventId, recordEvent, setEventAction } from '../src/event
 import type { Decision } from '../src/judge'
 import { clearVerdictCache, decide } from '../src/judge'
 import { messageOf } from '../src/model'
-import { maybeToast } from '../src/notify'
+import { maybeNotify, maybeToast } from '../src/notify'
 import { renderPane } from '../src/pane'
+import { redactText } from '../src/redact'
+import { printable } from '../src/text'
+import { rememberFooter, renderBand, renderFooter, renderToolBadge } from '../src/marks'
 import { resetSessionState, restore, resumePersist, saveNow, schedulePersist, sessionEndDeadline, suspendPersist } from '../src/persist'
 import { awaitVerdict, forgetVerdict, hasVerdict, startVerdict } from '../src/registry'
 import { formatReport, parseCases, runEval } from '../src/evaluate'
@@ -24,13 +27,33 @@ const VERDICT_WAIT_MS = 7000
 // A delivered prompt is cut before it is joined: at most this many blocks, and this many characters in all.
 const DELIVERY_BLOCKS = 32
 const DELIVERY_CHARS = 8192
+// The judged text kept on an event for the pane's excerpt (FR-UI-10).
+const EXCERPT_MAX = 400
+// The call's directory kept on an event, bounded (FR-UI-10). A directory that holds a credential, or that is cut, is not kept:
+// a link from it would show the credential, so the event keeps null and no link (FR-AX-3).
+const CWD_MAX = 1024
+
+export function boundedCwd(cwd: string | null): string | null {
+  if (cwd === null) return null
+  const window = cwd.slice(0, CWD_MAX)
+  const cut = cwd.length > window.length
+  return cut || redactText(window) !== window ? null : window
+}
 // The command's argument is read this far at most: the first word is all it uses.
 const COMMAND_ARG_MAX = 64
 // FR-EV-2: the labelled cases the eval runs, under the plugin's root.
 const EVAL_FILE = 'evals/drift-cases.json'
 
 type Logged = Pick<EngineInterface, 'ui'>
-type Call = { toolUseId: string; action: Action; mainTurnId: string | null; agentId: string | null; at: number }
+// `cwd` is the directory the call ran in, as tool.check read it: a link to a relative target is taken from it (FR-UI-10).
+type Call = {
+  toolUseId: string
+  action: Action
+  mainTurnId: string | null
+  agentId: string | null
+  cwd: string | null
+  at: number
+}
 type Judging = Call & { work: Promise<Decision> }
 
 let config: Config = DEFAULT_CONFIG
@@ -78,6 +101,8 @@ async function record($: CharterDollar, call: Call, d: Decision): Promise<Decisi
     target: call.action.target,
     verdict: d.verdict,
     reason: d.reason,
+    excerpt: call.action.kind === 'ok' ? printable(call.action.judgeText.slice(0, EXCERPT_MAX)) : '',
+    cwd: boundedCwd(call.cwd),
     source: d.source,
     action: actionOf(d.verdict),
     status: 'open',
@@ -93,6 +118,11 @@ async function record($: CharterDollar, call: Call, d: Decision): Promise<Decisi
   } catch (err) {
     logFailure($, 'toast not shown', err)
   }
+  // Sent beside the verdict, not before it: a notification the terminal holds never holds the verdict or its note.
+  void $.clock
+    .now()
+    .then(now => maybeNotify($, config, event, now))
+    .catch(err => logFailure($, 'notification not sent', err))
   await refreshStatus($)
   return d
 }
@@ -171,14 +201,20 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: 'stayontarget' }, ($, e) => renderPane($, e, config.mode))
+  // FR-UI-6 to FR-UI-8: the badge under a tool row, the band above the prompt and the clickable footer. Each one that throws
+  // leaves the engine's own tree in place.
+  on('ui.render', { component: 'ToolUse' }, ($, e, next) => renderToolBadge($, e, next)).catch(($, e, next) => next(e))
+  on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => renderBand($, e, next)).catch(($, e, next) => next(e))
+  on('ui.render', { component: 'AssistantMessage' }, ($, e, next) => renderFooter($, e, next)).catch(($, e, next) => next(e))
 
   // FR-ST-3: every write of the plugin's own state schedules a snapshot. Declared: `'state.set': StateSetEvent` and
   // `StateWrite = StateAddress & { value, … }` with `StateAddress.plugin` (docs/api/claude-code-2.1.309.d.ts), so a matcher
   // on `plugin` sees every write, and one hook covers every call site. The write passes through unchanged. A refused write
   // schedules too: the write that refused it landed, and the save coalesces the two.
+  // The expanded event is view state (FR-UI-10): it is not in a snapshot, so its writes schedule none.
   on('state.set', { plugin: 'stayontarget' }, async ($, e, next) => {
     const r = await next(e)
-    schedulePersist($)
+    if (e.key !== 'ui') schedulePersist($)
     return r
   })
 
@@ -246,6 +282,7 @@ export const register: Register = (on, options) => {
       action: extractAction(e.tool, e.input, here),
       mainTurnId,
       agentId: e.agentId ?? null,
+      cwd: here,
       at: now,
     }
     const work = decide($, config, call.action, now).then(d => record($, call, d))
@@ -292,7 +329,10 @@ export const register: Register = (on, options) => {
     const r = await next(e)
     try {
       const footer = await footerFor($, e.turnId)
-      if (footer !== null) return { ...r, text: footer }
+      if (footer !== null) {
+        rememberFooter(footer.text, footer)
+        return { ...r, text: footer.text }
+      }
     } catch (err) {
       logFailure($, 'turn footer not shown', err)
     }

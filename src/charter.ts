@@ -39,6 +39,8 @@ const CHARTER_MAX_TOKENS = 400
 const AMENDMENT_SEPARATOR = '\n---\n'
 const KINDS: readonly string[] = ['new-task', 'amendment', 'chit-chat']
 
+export type ScopeList = 'inScope' | 'outOfScope'
+
 type Kind = 'new-task' | 'amendment' | 'chit-chat'
 type Distilled = { kind: Kind; goal: string; inScope: string[]; outOfScope: string[] }
 type Usage = { inputTokens: number; outputTokens: number }
@@ -342,6 +344,22 @@ function noTaskYet(charter: Charter): boolean {
   return charter.request === ''
 }
 
+// FR-UI-10: a list the person edited keeps its value through a model result (FR-CH-5), as the goal does.
+function scopeFrom(current: Charter, list: ScopeList, fromReply: string[]): string[] {
+  return current.editedFields.includes(list) ? current[list] : fromReply
+}
+
+// The charter with `list` replaced and marked as edited (once), with its rev raised (FR-UI-10).
+function withItems(charter: Charter, list: ScopeList, items: string[]): Charter {
+  const editedFields = charter.editedFields.includes(list) ? charter.editedFields : [...charter.editedFields, list]
+  return {
+    ...charter,
+    ...(list === 'inScope' ? { inScope: items } : { outOfScope: items }),
+    editedFields,
+    rev: charter.rev + 1,
+  }
+}
+
 // Applies a reply (or the failure) to the charter the attempt was based on. Pure: the update may run it more than once.
 function applyAttempt(current: Charter, reply: Distilled | null, freshId: string, now: number): Charter {
   const pending = current.pendingText.join('\n')
@@ -364,8 +382,8 @@ function applyAttempt(current: Charter, reply: Distilled | null, freshId: string
       rev: current.rev + 1,
       request: capRequest(pending),
       goal: current.editedFields.includes('goal') ? current.goal : reply.goal,
-      inScope: reply.inScope,
-      outOfScope: reply.outOfScope,
+      inScope: scopeFrom(current, 'inScope', reply.inScope),
+      outOfScope: scopeFrom(current, 'outOfScope', reply.outOfScope),
       distilled: true,
       pendingText: [],
     }
@@ -392,8 +410,8 @@ function applyAttempt(current: Charter, reply: Distilled | null, freshId: string
     rev: current.rev + 1,
     request: capRequest(`${current.request}${AMENDMENT_SEPARATOR}${pending}`),
     goal: current.editedFields.includes('goal') ? current.goal : reply.goal,
-    inScope: reply.inScope,
-    outOfScope: reply.outOfScope,
+    inScope: scopeFrom(current, 'inScope', reply.inScope),
+    outOfScope: scopeFrom(current, 'outOfScope', reply.outOfScope),
     distilled: true,
     pendingText: [],
   }
@@ -437,17 +455,45 @@ async function record($: CharterDollar, attempt: Attempt, applied: boolean): Pro
 export async function editGoal($: StateDollar, goal: string): Promise<void> {
   const text = redactedBound(goal, ITEM_MAX).trim()
   if (text === '') return
-  const goalEdited: Charter['editedFields'] = ['goal']
   await update($, charterAtom, charter =>
     charter === null
       ? null
       : {
           ...charter,
           goal: text,
-          editedFields: charter.editedFields.includes('goal') ? charter.editedFields : goalEdited,
+          editedFields: charter.editedFields.includes('goal') ? charter.editedFields : [...charter.editedFields, 'goal' as const],
           rev: charter.rev + 1,
         },
   )
+}
+
+// FR-UI-10 and FR-CH-8: the person adds an item to a scope list. Trimmed, redacted and cut like a model item; an empty or
+// duplicate item, and one past LIST_MAX, changes nothing (the last is logged). The list counts as edited (FR-CH-5).
+export async function addScopeItem($: TurnDollar, list: ScopeList, text: string): Promise<void> {
+  const item = clean(text)
+  if (item === '') return
+  let refused = false
+  await update($, charterAtom, charter => {
+    if (charter === null || charter[list].includes(item)) return charter
+    if (charter[list].length >= LIST_MAX) {
+      refused = true
+      return charter
+    }
+    return withItems(charter, list, [...charter[list], item])
+  })
+  if (refused) $.ui.log(`stayontarget: ${list} holds at most ${LIST_MAX} items, the new one was not added`, { to: 'debug' })
+}
+
+// FR-UI-10 and FR-CH-8: the person removes the item at `index`; an index out of range changes nothing.
+export async function removeScopeItem($: TurnDollar, list: ScopeList, index: number): Promise<void> {
+  await update($, charterAtom, charter => {
+    if (charter === null || !Number.isInteger(index) || index < 0 || index >= charter[list].length) return charter
+    return withItems(
+      charter,
+      list,
+      charter[list].filter((_, i) => i !== index),
+    )
+  })
 }
 
 // FR-CH-8: the next main turn creates a new charter.

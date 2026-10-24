@@ -35,6 +35,8 @@ function drift(id: string, at = 200): DriftEvent {
     target: 'docs/notes.md',
     verdict: 'drift',
     reason: 'touches an unrelated file',
+    excerpt: '',
+    cwd: null,
     source: 'judge',
     action: 'note',
     status: 'open',
@@ -860,4 +862,46 @@ test('a /clear whose save is refused still resets, and shows not saved before th
   expect(statuses.at(-1)).toBe('stayontarget: no charter yet')
   store.refusing.on = false
   await clock.advance(2000)
+})
+
+test('a 0.1.0 snapshot whose events have no excerpt restores with an empty one (FR-ST-3, FR-UI-10)', async () => {
+  const w = world()
+  const { excerpt: _excerpt, ...oldEvent } = drift('e1')
+  w.plant('session:s', snapshot('s', { events: [oldEvent as DriftEvent] }))
+
+  expect(isSnapshot(w.stored('session:s'))).toBe(true)
+  expect(await restore(w.$, 's')).toBe(true)
+  expect(w.value(eventsAtom.ref)).toEqual([{ ...oldEvent, excerpt: '', cwd: null }])
+})
+
+test('an event whose cwd is not a string or null is rejected, and one with no cwd restores with null (FR-UI-10)', async () => {
+  expect(isSnapshot({ ...snapshot('s1'), events: [{ ...drift('e1'), cwd: 7 }] })).toBe(false)
+  expect(isSnapshot({ ...snapshot('s1'), events: [{ ...drift('e1'), cwd: null }] })).toBe(true)
+  expect(isSnapshot({ ...snapshot('s1'), events: [{ ...drift('e1'), cwd: 'C:\\work' }] })).toBe(true)
+
+  const w = world()
+  const { cwd: _cwd, ...noCwd } = drift('e2')
+  w.plant('session:s', snapshot('s', { events: [noCwd as DriftEvent] }))
+  expect(await restore(w.$, 's')).toBe(true)
+  expect(w.value(eventsAtom.ref)).toEqual([{ ...noCwd, excerpt: '', cwd: null }])
+})
+
+test('a snapshot with an event excerpt that is not a string is rejected (FR-UI-10)', () => {
+  expect(isSnapshot({ ...snapshot('s1'), events: [{ ...drift('e1'), excerpt: 7 }] })).toBe(false)
+  expect(isSnapshot({ ...snapshot('s1'), events: [{ ...drift('e1'), excerpt: 'ok' }] })).toBe(true)
+})
+
+test('a snapshot with an edited field that is not a charter list is rejected (FR-CH-5, FR-UI-10)', () => {
+  expect(isSnapshot({ ...snapshot('s1'), charter: { ...CHARTER, editedFields: ['inScope', 'outOfScope', 'goal'] } })).toBe(true)
+  expect(isSnapshot({ ...snapshot('s1'), charter: { ...CHARTER, editedFields: ['rev'] } })).toBe(false)
+})
+
+test('the view state is never in a snapshot (FR-UI-10)', async () => {
+  const w = world()
+  w.seed(charterAtom.ref, CHARTER)
+  w.seed(eventsAtom.ref, [drift('e1')])
+  w.seed({ plugin: 'stayontarget', key: 'ui' }, { expandedEventId: 'e1' })
+
+  expect(await saveNow(w.$, 's1')).toBe(true)
+  expect(w.stored('session:s1')).not.toHaveProperty('ui')
 })

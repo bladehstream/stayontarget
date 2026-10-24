@@ -1,6 +1,6 @@
 {
   "name": "stayontarget",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Keeps the agent on the requested scope: grades every change against what you asked for.",
   "author": { "name": "bladehstream" },
   "license": "MIT",
@@ -24,6 +24,12 @@
       "type": "boolean",
       "default": false,
       "description": "Show a toast on drift (max one per 30 s)"
+    },
+    "notify": {
+      "title": "Notifications",
+      "type": "boolean",
+      "default": false,
+      "description": "Send a desktop notification on drift (max one per minute)"
     }
   }
 }

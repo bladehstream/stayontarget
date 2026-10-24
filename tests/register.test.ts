@@ -1,5 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
+import { boundedCwd } from '../hooks/register'
 import { EMPTY_STATS, EVENTS_CAP, allowancesAtom, charterAtom, eventsAtom, statsAtom } from '../src/state'
 
 test('session.start passes through the plugin', async ($, on) => {
@@ -34,6 +35,15 @@ test('the initial stats are all zero with no failure', () => {
     charterFailures: 0,
     persistFailed: false,
   })
+})
+
+test('a call directory that holds a credential, or is too long, is not kept (FR-AX-3, FR-UI-10)', () => {
+  // The secret never reaches state: a directory that redaction would change is stored as null, so no link is made from it.
+  expect(boundedCwd('/work/token=supersecret/project')).toBeNull()
+  expect(boundedCwd('/work/project')).toBe('/work/project')
+  expect(boundedCwd('x'.repeat(1025))).toBeNull()
+  expect(boundedCwd('x'.repeat(1024))).toBe('x'.repeat(1024))
+  expect(boundedCwd(null)).toBeNull()
 })
 
 test('the events cap is 200', () => {
